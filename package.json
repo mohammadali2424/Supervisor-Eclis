@@ -1,41 +1,21 @@
 {
-
   "name": "telegram-trigger-bot",
-
   "version": "2.2.0",
-
   "description": "ربات مدیریت تریگرهای اتوماتیک با قابلیت آزادسازی کاربر از قرنطینه",
-
   "main": "index1.js",
-
   "scripts": {
-
     "start": "node index1.js",
-
     "dev": "nodemon index1.js"
-
   },
-
   "dependencies": {
-
     "telegraf": "^4.16.3",
-
     "@supabase/supabase-js": "^2.39.3",
-
     "express": "^4.19.2",
-
     "axios": "^1.6.0",
-
-    "node-cache": "^5.1.2"
-
+    "node-cache": "^5.1.2",
+    "tslib": "^2.6.2"
   },
-
   "engines": {
-
     "node": ">=18.0.0"
-
   }
-
 }
-
-
