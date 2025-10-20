@@ -3,33 +3,32 @@ const { createClient } = require('@supabase/supabase-js');
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
-const https = require('https');
 
 // ==================[ تنظیمات اولیه ]==================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 const OWNER_ID = process.env.OWNER_ID || '123456789';
 const QUARANTINE_BOT_URL = process.env.QUARANTINE_BOT_URL;
 const API_SECRET_KEY = process.env.API_SECRET_KEY;
 
-// ==================[ تنظیمات چندرباتی جدید ]==================
+// ==================[ تنظیمات چندرباتی ]==================
 const BOT_INSTANCES = process.env.BOT_INSTANCES ? 
   JSON.parse(process.env.BOT_INSTANCES) : [];
   
 const SELF_BOT_ID = process.env.SELF_BOT_ID || 'trigger_1';
 const SYNC_ENABLED = process.env.SYNC_ENABLED === 'true';
 
-// کش ب��ای ذخیره وضعیت ربات‌ها و تریگرها
+// کش برای ذخیره وضعیت
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 600 });
 
-// ==================[ مکانیزم قطع مدار (Circuit Breaker) جدید ]==================
+// ==================[ مکانیزم قطع مدار ]==================
 const circuitBreaker = {
-  state: 'CLOSED', // می‌تواند: CLOSED, OPEN, HALF_OPEN
+  state: 'CLOSED',
   failureCount: 0,
-  failureThreshold: 10, // پس از ۱۰ خطای پشت سرهم
-  timeout: 30000, // به مدت ۳۰ ثانیه باز می‌ماند
+  failureThreshold: 5,
+  timeout: 30000,
   nextAttempt: Date.now()
 };
 
@@ -47,11 +46,8 @@ const checkCircuitBreaker = () => {
 };
 
 const recordSuccess = () => {
-  if (circuitBreaker.state === 'HALF_OPEN') {
-    circuitBreaker.state = 'CLOSED';
-    circuitBreaker.failureCount = 0;
-    console.log('🟢 Circuit Breaker reset to CLOSED');
-  }
+  circuitBreaker.state = 'CLOSED';
+  circuitBreaker.failureCount = 0;
 };
 
 const recordFailure = () => {
@@ -62,7 +58,6 @@ const recordFailure = () => {
     console.log('🔴 Circuit Breaker triggered to OPEN state');
   }
 };
-// ==================[ پایان مکانیزم قطع مدار ]==================
 
 // بررسی متغیرهای محیطی ضروری
 if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
@@ -70,33 +65,14 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
   process.exit(1);
 }
 
-// ایجاد axios instance با تنظیمات بهینه
-const axiosInstance = axios.create({
-  timeout: 15000,
-  httpsAgent: new https.Agent({
-    keepAlive: true,
-    maxSockets: 50,
-    keepAliveMsecs: 10000
-  })
-});
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-// ایجاد bot instance با تنظیمات بهینه
-const bot = new Telegraf(BOT_TOKEN, {
-  telegram: {
-    agent: new https.Agent({
-      keepAlive: true,
-      timeout: 10000,
-      maxSockets: 50
-    })
-  },
-  handlerTimeout: 9000
-});
-
+const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
+// میدلورهای اصلی
 app.use(express.json());
+
+// سشن برای تنظیم تریگر
 bot.use(session({
   defaultSession: () => ({
     settingTrigger: false,
@@ -131,9 +107,8 @@ const checkUserAccess = async (ctx) => {
   }
 };
 
-// ==================[ توابع پیشرفته برای آزادسازی با مکانیزم قطع مدار ]==================
+// ==================[ توابع آزادسازی ]==================
 const releaseUserFromQuarantine = async (userId) => {
-  // بررسی قطع مدار
   if (!checkCircuitBreaker()) {
     throw new Error('Circuit Breaker is OPEN');
   }
@@ -148,139 +123,86 @@ const releaseUserFromQuarantine = async (userId) => {
     
     const results = [];
     
-    // آزادسازی از تمام ربات‌های قرنطینه
     for (const botInstance of BOT_INSTANCES) {
       if (botInstance.type === 'quarantine') {
-        const result = await releaseUserFromBotInstance(userId, botInstance);
-        results.push(result);
+        try {
+          let apiUrl = botInstance.url;
+          if (!apiUrl.startsWith('http')) apiUrl = `https://${apiUrl}`;
+          apiUrl = apiUrl.replace(/\/$/, '');
+          
+          const response = await axios.post(`${apiUrl}/api/release-user`, {
+            userId: userId,
+            secretKey: botInstance.secretKey,
+            sourceBot: SELF_BOT_ID
+          }, { timeout: 5000 });
+          
+          results.push({ success: true, botId: botInstance.id });
+        } catch (error) {
+          console.error(`❌ خطا در ارتباط با ${botInstance.id}:`, error.message);
+          results.push({ success: false, botId: botInstance.id });
+        }
       }
     }
     
-    // همچنین آزادسازی از ربات فعلی (اگر قرنطینه باشد)
     if (QUARANTINE_BOT_URL && API_SECRET_KEY) {
       const currentResult = await releaseUserSingleInstance(userId);
-      results.push(currentResult);
+      results.push({ success: currentResult });
     }
     
     const successCount = results.filter(r => r.success).length;
     console.log(`✅ کاربر ${userId} از ${successCount}/${results.length} ربات آزاد شد`);
     
-    // ثبت موفقیت در قطع مدار
     recordSuccess();
-    
     return successCount > 0;
   } catch (error) {
-    // ثبت خطا در قطع مدار
     recordFailure();
     console.error('❌ خطا در آزادسازی چندرباتی:', error);
-    // Fallback به حالت عادی
     return await releaseUserSingleInstance(userId);
   }
 };
 
-// تابع کمکی برای آزادسازی از یک ربات خاص
-const releaseUserFromBotInstance = async (userId, botInstance) => {
-  try {
-    let apiUrl = botInstance.url;
-    if (!apiUrl.startsWith('http')) {
-      apiUrl = `https://${apiUrl}`;
-    }
-    
-    apiUrl = apiUrl.replace(/\/$/, '');
-    const fullUrl = `${apiUrl}/api/release-user`;
-    
-    console.log(`🔗 ارسال درخواست به: ${fullUrl}`);
-
-    const response = await axiosInstance.post(fullUrl, {
-      userId: userId,
-      secretKey: botInstance.secretKey,
-      sourceBot: SELF_BOT_ID
-    }, {
-      timeout: 8000,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-
-    console.log(`✅ پاسخ از ${botInstance.id}:`, response.data);
-    return { success: true, botId: botInstance.id, data: response.data };
-  } catch (error) {
-    console.error(`❌ خطا در ارتباط با ${botInstance.id}:`, error.message);
-    return { success: false, botId: botInstance.id, error: error.message };
-  }
-};
-
-// تابع اصلی آزادسازی
 const releaseUserSingleInstance = async (userId) => {
   try {
     if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) {
-      console.error('❌ متغیرهای QUARANTINE_BOT_URL یا API_SECRET_KEY تنظیم نشده‌اند');
+      console.error('❌ متغیرهای ارتباطی تنظیم نشده‌اند');
       return false;
     }
 
     let apiUrl = QUARANTINE_BOT_URL;
-    if (!apiUrl.startsWith('http')) {
-      apiUrl = `https://${apiUrl}`;
-    }
-    
+    if (!apiUrl.startsWith('http')) apiUrl = `https://${apiUrl}`;
     apiUrl = apiUrl.replace(/\/$/, '');
-    const fullUrl = `${apiUrl}/api/release-user`;
     
-    console.log(`🔗 ارس��ل درخواست تکی به: ${fullUrl}`);
-
-    const response = await axiosInstance.post(fullUrl, {
+    const response = await axios.post(`${apiUrl}/api/release-user`, {
       userId: userId,
       secretKey: API_SECRET_KEY,
       sourceBot: SELF_BOT_ID
-    }, {
-      timeout: 10000,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+    }, { timeout: 8000 });
 
-    console.log(`✅ پاسخ دریافت شد:`, response.data);
     return response.data.success;
   } catch (error) {
-    console.error('❌ خطا در آزاد کردن کاربر از قرنطینه:');
-    
-    if (error.response) {
-      console.error('📋 وضعیت:', error.response.status);
-      console.error('📋 داده پاسخ:', error.response.data);
-    } else if (error.request) {
-      console.error('📋 درخواست ارسال شده اما پاسخی دریافت نشد');
-    } else {
-      console.error('📋 خطا:', error.message);
-    }
-    
+    console.error('❌ خطا در آزاد کردن کاربر از قرنطینه:', error.message);
     return false;
   }
 };
-// ==================[ پایان توابع پیشرفته ]==================
 
-// دکمه شیشه‌ای با متن Eclis World
+// ==================[ دکمه شیشه‌ای ]==================
 const createGlassButton = () => {
   return Markup.inlineKeyboard([
     Markup.button.callback('𝐄𝐜𝐥𝐢𝐬 𝐖𝐨𝐫𝐥𝐝', 'show_glass_message')
   ]);
 };
 
-// پردازش کلیک روی دکمه شیشه‌ای
 bot.action('show_glass_message', async (ctx) => {
   try {
     const messageText = ctx.update.callback_query.message.text;
-    let alertMessage = '';
+    let alertMessage = 'به دنیای اکلیس خوش آمدید!';
     
     if (messageText.includes('ورود') || messageText.includes('ماشین') || messageText.includes('موتور')) {
-      if (messageText.includes('زمان سفر') || messageText.includes('زمان آماده سازی')) {
-        alertMessage = 'مدت زمان شما تا دریافت بقیه مسیر ها';
-      } else {
-        alertMessage = 'مسیر های شما برای رفتن به مکان بعدی';
-      }
+      alertMessage = messageText.includes('زمان سفر') || messageText.includes('زمان آماده سازی') 
+        ? 'مدت زمان شما تا دریافت بقیه مسیر ها' 
+        : 'مسیر های شما برای رفتن به مکان بعدی';
     } else if (messageText.includes('خروج') || messageText.includes('سفر به سلامت')) {
       alertMessage = 'به مسیر هایی که انتخاب میکنین ، دقت کنین ، شاید خطری شمارا تهدید کند...';
-    } else {
-      alertMessage = 'به دنیای اکلیس خوش آمدید!';
     }
     
     await ctx.answerCbQuery(alertMessage, { show_alert: true });
@@ -290,9 +212,8 @@ bot.action('show_glass_message', async (ctx) => {
   }
 });
 
-// ==================[ تابع handleTrigger با مکانیزم قطع مدار ]==================
+// ==================[ تابع handleTrigger ]==================
 const handleTrigger = async (ctx, triggerType) => {
-  // بررسی قطع مدار قبل از پردازش
   if (!checkCircuitBreaker()) {
     try {
       await ctx.reply('⏳ سیستم در حال حاضر شلوغ است. لطفاً چند لحظه دیگر تلاش کنید.');
@@ -321,7 +242,6 @@ const handleTrigger = async (ctx, triggerType) => {
     let delayedMessage = 'عملیات تکمیل شد! ✅';
     let messageEntities = null;
 
-    // استفاده از کش برای بهبود عملکرد
     const cacheKey = `trigger:${ctx.chat.id}:${triggerType}`;
     let triggerData = cache.get(cacheKey);
     
@@ -336,7 +256,7 @@ const handleTrigger = async (ctx, triggerType) => {
 
         if (data) {
           triggerData = data;
-          cache.set(cacheKey, data, 300); // کش برای 5 دقیقه
+          cache.set(cacheKey, data, 300);
         }
       } catch (error) {
         console.error('خطا در دریافت تریگر:', error);
@@ -389,157 +309,29 @@ const handleTrigger = async (ctx, triggerType) => {
           console.log(`❌ آزاد کردن کاربر ${ctx.from.id} از قرنطینه ناموفق بود`);
         }
         
-        // ثبت موفقیت در قطع مدار
         recordSuccess();
       } catch (error) {
-        // ثبت خطا در قطع مدار
         recordFailure();
         console.error('❌ خطا در ارسال پیام تأخیری:', error);
-        try {
-          await ctx.telegram.sendMessage(
-            ctx.chat.id, 
-            delayedMessage, 
-            { 
-              reply_to_message_id: ctx.message.message_id,
-              ...createGlassButton(),
-              disable_web_page_preview: true
-            }
-          );
-        } catch (fallbackError) {
-          console.error('❌ خطا در ارسال fallback پیام:', fallbackError);
-        }
       }
     }, delay * 1000);
   } catch (error) {
-    // ثبت خطا در قطع مدار
     recordFailure();
     console.error(`❌ خطا در پردازش #${triggerType}:`, error);
   }
 };
-// ==================[ پایان تابع handleTrigger بهبود یافته ]==================
 
-// ==================[ CATCH-ALL MECHANISM - مکانیزم جامع ]==================
-// پردازش همه انواع پیام‌ها
-bot.on('message', async (ctx) => {
-  try {
-    const messageText = ctx.message.text;
-    if (!messageText) return;
+// ==================[ دستورات ربات ]==================
 
-    // پردازش تریگرها
-    if (messageText.includes('#ورود')) await handleTrigger(ctx, 'ورود');
-    if (messageText.includes('#ماشین')) await handleTrigger(ctx, 'ماشین');
-    if (messageText.includes('#موتور')) await handleTrigger(ctx, 'موتور');
-    if (messageText.includes('#خروج')) await handleTrigger(ctx, 'خروج');
-
-    // پردازش تنظیمات تریگر
-    if (!ctx.session.settingTrigger) return;
-
-    const userAccess = await checkUserAccess(ctx);
-    if (!userAccess.hasAccess) {
-      ctx.reply(`❌ ${userAccess.reason}`);
-      ctx.session.settingTrigger = false;
-      return;
-    }
-
-    if (ctx.session.step === 'delay') {
-      const delay = parseInt(ctx.message.text);
-      if (isNaN(delay) || delay <= 0 || delay > 3600) {
-        ctx.reply('❌ لطفاً یک عدد معتبر بین 1 تا 3600 ثانیه وارد کنید');
-        return;
-      }
-
-      ctx.session.delay = delay;
-      ctx.session.step = 'message';
-      
-      const triggerEmoji = ctx.session.triggerType === 'ورود' ? '🚪' : 
-                          ctx.session.triggerType === 'ماشین' ? '🚗' : '🏍️';
-      
-      await ctx.reply(`${triggerEmoji} زمان تأخیر ثبت شد: ${formatTime(delay)}\n\n📝 حالا پیام تأخیری را برای #${ctx.session.triggerType} ارسال کنید:\n\n💡 می‌توانید از هر فرمتی استفاده کنید (لینک، بولد، ایتالیک و غیره)`);
-    } else if (ctx.session.step === 'message') {
-      try {
-        const messageEntities = ctx.message.entities || [];
-        
-        await supabase
-          .from('triggers')
-          .delete()
-          .eq('chat_id', ctx.session.chatId)
-          .eq('trigger_type', ctx.session.triggerType);
-
-        await supabase.from('triggers').insert({
-          chat_id: ctx.session.chatId,
-          trigger_type: ctx.session.triggerType,
-          delay: ctx.session.delay,
-          delayed_message: ctx.message.text,
-          message_entities: messageEntities,
-          updated_at: new Date().toISOString(),
-          set_by: ctx.from.id,
-          set_by_username: ctx.from.username || ctx.from.first_name
-        });
-
-        // پاک کردن کش مربوط به این تریگر
-        const cacheKey = `trigger:${ctx.session.chatId}:${ctx.session.triggerType}`;
-        cache.del(cacheKey);
-
-        const triggerEmoji = ctx.session.triggerType === 'ورود' ? '🚪' : 
-                            ctx.session.triggerType === 'ماشین' ? '🚗' : '🏍️';
-        
-        const hasFormatting = messageEntities.length > 0;
-        let confirmationMessage = `${triggerEmoji} تریگر #${ctx.session.triggerType} با موفقیت تنظیم شد!\n\n✅ تریگر قبلی جایگزین شد.`;
-        
-        if (hasFormatting) {
-          confirmationMessage += `\n\n📋 پیام شما با فرمت اصلی ذخیره شد.`;
-        }
-        
-        ctx.reply(confirmationMessage);
-      } catch (error) {
-        console.error('❌ خطای دیتابیس:', error);
-        ctx.reply('❌ خطایی در ذخیره تنظیمات رخ داد.');
-      }
-
-      ctx.session.settingTrigger = false;
-      ctx.session.step = null;
-      ctx.session.delay = null;
-      ctx.session.triggerType = null;
-      ctx.session.chatId = null;
-    }
-  } catch (error) {
-    console.error('خطا در پردازش پیام:', error);
-  }
+// دستور start
+bot.start((ctx) => {
+  console.log(`🚀 دستور start توسط کاربر ${ctx.from.id} فراخوانی شد`);
+  ctx.reply('اوپراتور اکلیس درخدمت شماست 🥷🏻');
 });
 
-// پردازش همه callback queries
-bot.on('callback_query', async (ctx) => {
-  try {
-    // اگر callback مربوط به دکمه شیشه‌ای نیست، آن را نادیده بگیر
-    if (ctx.update.callback_query.data !== 'show_glass_message') {
-      await ctx.answerCbQuery();
-      return;
-    }
-  } catch (error) {
-    console.error('خطا در پردازش callback:', error);
-    try {
-      await ctx.answerCbQuery();
-    } catch (e) {
-      // ignore
-    }
-  }
-});
-
-// مدیریت خطاهای جهانی
-bot.catch((err, ctx) => {
-  console.error('خطای جهانی در ربات:', err);
-  try {
-    ctx.reply('❌ خطایی در پردازش درخواست رخ داد.');
-  } catch (e) {
-    // ignore
-  }
-});
-// ==================[ پایان مکانیزم جامع ]==================
-
-// دستورات ربات
-bot.start((ctx) => ctx.reply('اوپراتور اکلیس درخدمت شماست 🥷🏻'));
-
+// دستور help
 bot.command('help', (ctx) => {
+  console.log(`📖 دستور help توسط کاربر ${ctx.from.id} فراخوانی شد`);
   ctx.reply(`
 🤖 راهنمای ربات اکلیس - نسخه مدیریتی
 
@@ -550,21 +342,16 @@ bot.command('help', (ctx) => {
 /set_t3 - تنظیم تریگر برای #موتور
 /help - نمایش این راهنما
 
-#ورود - فعال کردن تریگر ورود (همه کاربران)
-#ماشین - فعال کردن تریگر ماشین (همه کاربران)
-#موتور - فعال کردن تریگر موتور (همه کاربران)
-#خروج - خروج از منطقه (همه کاربران)
-
-💡 نکته: ربات به طور خودکار تمام فرمت‌های متن را حفظ می‌کند:
-• هایپرلینک‌ها
-• متن بولد (**متن**)
-• متن ایتالیک (_متن_)
-• متن خط خورده (~متن~)
-• کد اینلاین \`کد\`
+#ورود - فعال کردن تریگر ورود
+#ماشین - فعال کردن تریگر ماشین
+#موتور - فعال کردن تریگر موتور
+#خروج - خروج از منطقه
   `);
 });
 
+// دستور status
 bot.command('status', async (ctx) => {
+  console.log(`📊 دستور status توسط کاربر ${ctx.from.id} فراخوانی شد`);
   try {
     const userAccess = await checkUserAccess(ctx);
     if (!userAccess.hasAccess) {
@@ -592,19 +379,10 @@ bot.command('status', async (ctx) => {
       triggerInfo += '\n❌ خطا در دریافت اطلاعات';
     }
 
-    // نمایش وضعیت قطع مدار
-    const breakerStatus = circuitBreaker.state === 'OPEN' ? '🔴 باز' : 
-                         circuitBreaker.state === 'HALF_OPEN' ? '🟡 نیمه باز' : '🟢 بسته';
-    
-    const cacheStats = cache.getStats();
-    const cacheInfo = `\n💾 وضعیت ��ش: ${Math.round(cacheStats.keys / cacheStats.max * 100)}% پر`;
-
     ctx.reply(`
 🤖 وضعیت ربات در این گروه:
 ${triggerInfo}
-${cacheInfo}
 
-⚡ وضعیت قطع مدار: ${breakerStatus}
 👤 دسترسی شما: ${userAccess.isOwner ? 'مالک' : userAccess.isCreator ? 'سازنده گروه' : userAccess.isAdmin ? 'ادمین' : 'عضو'}
     `);
   } catch (error) {
@@ -615,6 +393,7 @@ ${cacheInfo}
 
 // دستورات تنظیم تریگر
 const setupTrigger = async (ctx, triggerType) => {
+  console.log(`⚙️ دستور set_t برای ${triggerType} توسط کاربر ${ctx.from.id} فراخوانی شد`);
   try {
     const userAccess = await checkUserAccess(ctx);
     if (!userAccess.hasAccess) {
@@ -639,34 +418,116 @@ bot.command('set_t1', (ctx) => setupTrigger(ctx, 'ورود'));
 bot.command('set_t2', (ctx) => setupTrigger(ctx, 'ماشین'));
 bot.command('set_t3', (ctx) => setupTrigger(ctx, 'موتور'));
 
-// ==================[ endpointهای جدید برای مانیتورینگ ]==================
+// ==================[ پردازش پیام‌ها ]==================
+
+// پردازش تریگرها از پیام‌ها
+bot.on('text', async (ctx) => {
+  try {
+    const messageText = ctx.message.text;
+    console.log(`📨 دریافت پیام: ${messageText} از کاربر ${ctx.from.id}`);
+    
+    if (messageText.includes('#ورود')) {
+      console.log(`🎴 پردازش تریگر ورود توسط کاربر ${ctx.from.id}`);
+      await handleTrigger(ctx, 'ورود');
+    }
+    if (messageText.includes('#ماشین')) {
+      console.log(`🚗 پردازش تریگر ماشین توسط کاربر ${ctx.from.id}`);
+      await handleTrigger(ctx, 'ماشین');
+    }
+    if (messageText.includes('#موتور')) {
+      console.log(`🏍️ پردازش تریگر موتور توسط کاربر ${ctx.from.id}`);
+      await handleTrigger(ctx, 'موتور');
+    }
+    if (messageText.includes('#خروج')) {
+      console.log(`🧭 پردازش تریگر خروج توسط کاربر ${ctx.from.id}`);
+      await handleTrigger(ctx, 'خروج');
+    }
+
+    // پردازش تنظیمات تریگر
+    if (!ctx.session.settingTrigger) return;
+
+    const userAccess = await checkUserAccess(ctx);
+    if (!userAccess.hasAccess) {
+      ctx.reply(`❌ ${userAccess.reason}`);
+      ctx.session.settingTrigger = false;
+      return;
+    }
+
+    if (ctx.session.step === 'delay') {
+      const delay = parseInt(ctx.message.text);
+      if (isNaN(delay) || delay <= 0 || delay > 3600) {
+        ctx.reply('❌ لطفاً یک عدد معتبر بین 1 تا 3600 ثانیه وارد کنید');
+        return;
+      }
+
+      ctx.session.delay = delay;
+      ctx.session.step = 'message';
+      
+      const triggerEmoji = ctx.session.triggerType === 'ورود' ? '🚪' : 
+                          ctx.session.triggerType === 'ماشین' ? '🚗' : '🏍️';
+      
+      await ctx.reply(`${triggerEmoji} زمان تأخیر ثبت شد: ${formatTime(delay)}\n\n📝 حالا پیام تأخیری را ارسال کنید:`);
+    } else if (ctx.session.step === 'message') {
+      try {
+        const messageEntities = ctx.message.entities || [];
+        
+        await supabase
+          .from('triggers')
+          .delete()
+          .eq('chat_id', ctx.session.chatId)
+          .eq('trigger_type', ctx.session.triggerType);
+
+        await supabase.from('triggers').insert({
+          chat_id: ctx.session.chatId,
+          trigger_type: ctx.session.triggerType,
+          delay: ctx.session.delay,
+          delayed_message: ctx.message.text,
+          message_entities: messageEntities,
+          updated_at: new Date().toISOString(),
+          set_by: ctx.from.id,
+          set_by_username: ctx.from.username || ctx.from.first_name
+        });
+
+        const cacheKey = `trigger:${ctx.session.chatId}:${ctx.session.triggerType}`;
+        cache.del(cacheKey);
+
+        const triggerEmoji = ctx.session.triggerType === 'ورود' ? '🚪' : 
+                            ctx.session.triggerType === 'ماشین' ? '🚗' : '🏍️';
+        
+        ctx.reply(`${triggerEmoji} تریگر #${ctx.session.triggerType} با موفقیت تنظیم شد!\n\n✅ تریگر قبلی جایگزین شد.`);
+      } catch (error) {
+        console.error('❌ خطای دیتابیس:', error);
+        ctx.reply('❌ خطایی در ذخیره تنظیمات رخ داد.');
+      }
+
+      ctx.session.settingTrigger = false;
+      ctx.session.step = null;
+      ctx.session.delay = null;
+      ctx.session.triggerType = null;
+      ctx.session.chatId = null;
+    }
+  } catch (error) {
+    console.error('خطا در پردازش پیام:', error);
+  }
+});
+
+// ==================[ endpointهای API ]==================
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    botId: SELF_BOT_ID,
+    timestamp: new Date().toISOString(),
+    port: PORT
+  });
+});
+
 app.get('/api/bot-status', (req, res) => {
-  const cacheStats = cache.getStats();
-  const memoryUsage = process.memoryUsage();
-  
   res.status(200).json({
     status: 'online',
     botId: SELF_BOT_ID,
     type: 'trigger',
     timestamp: new Date().toISOString(),
-    connectedBots: BOT_INSTANCES.length,
-    version: '2.3.0',
-    circuitBreaker: {
-      state: circuitBreaker.state,
-      failureCount: circuitBreaker.failureCount,
-      nextAttempt: circuitBreaker.nextAttempt
-    },
-    cache: {
-      keys: cacheStats.keys,
-      hits: cacheStats.hits,
-      misses: cacheStats.misses,
-      hitRate: cacheStats.hits / (cacheStats.hits + cacheStats.misses) || 0
-    },
-    memory: {
-      used: Math.round(memoryUsage.heapUsed / 1024 / 1024) + 'MB',
-      total: Math.round(memoryUsage.heapTotal / 1024 / 1024) + 'MB',
-      usage: Math.round((memoryUsage.heapUsed / memoryUsage.heapTotal) * 100) + '%'
-    }
+    connectedBots: BOT_INSTANCES.length
   });
 });
 
@@ -674,20 +535,16 @@ app.post('/api/sync-release', async (req, res) => {
   try {
     const { userId, secretKey, sourceBot } = req.body;
     
-    // بررسی کلید امنیتی
     if (!secretKey || secretKey !== API_SECRET_KEY) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
     console.log(`🔄 درخواست هماهنگی از ${sourceBot} برای کاربر ${userId}`);
     
-    // اگر این ربات قرنطینه است، کاربر را آزاد کند
-    const result = await processSyncRelease(userId);
-    
     res.status(200).json({
       success: true,
       botId: SELF_BOT_ID,
-      processed: result,
+      processed: true,
       message: `درخواست هماهنگی از ${sourceBot} پردازش شد`
     });
   } catch (error) {
@@ -696,122 +553,46 @@ app.post('/api/sync-release', async (req, res) => {
   }
 });
 
-const processSyncRelease = async (userId) => {
-  // این تابع در ربات قرنطینه پیاده‌سازی می‌شود
-  console.log(`📥 دریافت درخواست آزادسازی برای کاربر ${userId}`);
-  return true;
-};
+// ==================[ راه‌اندازی سرور ]==================
 
-// endpoint جدید برای ریست قطع مدار
-app.post('/api/circuit-breaker/reset', (req, res) => {
-  circuitBreaker.state = 'CLOSED';
-  circuitBreaker.failureCount = 0;
-  circuitBreaker.nextAttempt = Date.now();
-  
-  console.log('🟢 Circuit Breaker manually reset');
-  res.status(200).json({ 
-    success: true, 
-    message: 'Circuit Breaker reset successfully',
-    state: circuitBreaker.state
-  });
-});
-// ==================[ پایان endpointهای جدید ]==================
+// استفاده از webhook callback (مشابه ربات قرنطینه)
+app.use(bot.webhookCallback('/webhook'));
 
-// وب سرور
-app.post('/webhook', async (req, res) => {
-  try {
-    await bot.handleUpdate(req.body, res);
-  } catch (error) {
-    console.error('❌ خطا در پردازش Webhook:', error);
-    res.status(200).send('OK');
-  }
+app.get('/', (req, res) => {
+  res.send(`🤖 ربات تلگرام ${SELF_BOT_ID} در حال اجراست!`);
 });
 
-app.get('/', (req, res) => res.send('🤖 ربات تلگرام در حال اجراست!'));
-app.get('/test-db', async (req, res) => {
-  try {
-    const { data, error } = await supabase.from('triggers').select('count').limit(1);
-    error ? res.status(500).send('❌ خطای اتصال به دیتابیس') : res.send('✅ اتصال به دیتابیس موفقیت‌آمیز است');
-  } catch (error) {
-    res.status(500).send('❌ خطای غیرمنتظره');
-  }
-});
-
-app.get('/test-quarantine-connection', async (req, res) => {
-  try {
-    if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) {
-      return res.status(500).send('❌ متغیرهای ارتباطی تنظیم نشده‌اند');
-    }
-
-    let apiUrl = QUARANTINE_BOT_URL;
-    if (!apiUrl.startsWith('http')) {
-      apiUrl = `https://${apiUrl}`;
-    }
-    
-    apiUrl = apiUrl.replace(/\/$/, '');
-    const fullUrl = `${apiUrl}/health`;
-    
-    console.log(`🔗 تست اتصال به: ${fullUrl}`);
-    
-    const response = await axiosInstance.get(fullUrl, { timeout: 10000 });
-    res.status(200).json({ 
-      success: true, 
-      message: 'اتصال موفقیت‌آمیز بود',
-      response: response.data
-    });
-  } catch (error) {
-    console.error('❌ خطا در تست اتصال:', error.message);
-    res.status(500).json({ 
-      success: false, 
-      message: 'خطا در اتصال',
-      error: error.message 
-    });
-  }
-});
-
-// تابع برای تنظیم Webhook با retry
-const setupWebhookWithRetry = async (maxRetries = 5) => {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      console.log(`🔄 تلاش ${attempt} برای تنظیم Webhook...`);
-      await bot.telegram.setWebhook(`${process.env.WEBHOOK_DOMAIN}/webhook`);
-      console.log('✅ Webhook با موفقیت تنظیم شد');
-      return true;
-    } catch (error) {
-      console.error(`❌ تلاش ${attempt} برای Webhook ناموفق:`, error.message);
-      if (attempt === maxRetries) {
-        console.error('❌ همه تلاش‌ها برای تنظیم Webhook ناموفق بود');
-        return false;
-      }
-      // انتظار قبل از تلاش مجدد
-      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
-    }
-  }
-};
-
-app.listen(PORT, async () => {
-  console.log(`🚀 سرور در پورت ${PORT} راه‌اندازی شد`);
+app.listen(PORT, () => {
+  console.log(`🚀 سرور تریگر ${SELF_BOT_ID} در پورت ${PORT} راه‌اندازی شد`);
   console.log(`🤖 شناسه ربات: ${SELF_BOT_ID}`);
-  console.log(`🔗 حالت هماهنگی: ${SYNC_ENABLED ? 'فعال' : 'غیرف��ال'}`);
+  console.log(`🔗 حالت هماهنگی: ${SYNC_ENABLED ? 'فعال' : 'غیرفعال'}`);
   console.log(`👥 تعداد ربات‌های متصل: ${BOT_INSTANCES.length}`);
-  console.log(`⚡ Circuit Breaker: ${circuitBreaker.state}`);
-  console.log(`💾 کش: فعال با TTL: 300 ثانیه`);
-  
-  if (process.env.WEBHOOK_DOMAIN) {
-    try {
-      await setupWebhookWithRetry();
-    } catch (error) {
-      console.error('❌ خطا در تنظیم Webhook:', error);
-    }
-  } else {
-    console.log('🔄 استفاده از Long Polling...');
-    bot.launch().then(() => {
-      console.log('✅ ربات با Long Polling راه‌اندازی شد');
-    }).catch(error => {
-      console.error('❌ خطا در راه‌اندازی ربات:', error);
-    });
-  }
 });
 
+// راه‌اندازی ربات (مشابه ربات قرنطینه)
+if (process.env.RENDER_EXTERNAL_URL) {
+  const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
+  console.log(`🌐 تنظیم Webhook: ${webhookUrl}`);
+  
+  bot.telegram.setWebhook(webhookUrl)
+    .then(() => {
+      console.log('✅ Webhook با موفقیت تنظیم شد');
+      console.log('🤖 ربات آماده دریافت پیام‌ها است');
+    })
+    .catch(error => {
+      console.error('❌ خطا در تنظیم Webhook:', error);
+      console.log('🔄 استفاده از Long Polling...');
+      bot.launch().then(() => {
+        console.log('✅ ربات با Long Polling راه‌اندازی شد');
+      });
+    });
+} else {
+  console.log('🔄 استفاده از Long Polling...');
+  bot.launch().then(() => {
+    console.log('✅ ربات با Long Polling راه‌اندازی شد');
+  });
+}
+
+// Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
