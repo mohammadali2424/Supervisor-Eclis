@@ -83,6 +83,49 @@ bot.use(session({
   })
 }));
 
+// ==================[ پینگ خودکار برای جلوگیری از خوابیدن ]==================
+const startAutoPing = () => {
+  if (!process.env.RENDER_EXTERNAL_URL) {
+    console.log('🚫 پینگ خودکار غیرفعال (محلی)');
+    return;
+  }
+
+  const PING_INTERVAL = 13 * 60 * 1000 + 59 * 1000; // هر 13 دقیقه و 59 ثانیه
+  const selfUrl = process.env.RENDER_EXTERNAL_URL;
+
+  console.log('🔁 راه‌اندازی پینگ خودکار هر 13:59 دقیقه...');
+
+  const performPing = async () => {
+    try {
+      console.log('🏓 ارسال پینگ خودکار برای جلوگیری از خوابیدن...');
+      const startTime = Date.now();
+      const response = await axios.get(`${selfUrl}/ping`, { 
+        timeout: 10000 
+      });
+      const endTime = Date.now();
+      console.log(`✅ پینگ موفق (${endTime - startTime}ms) - ربات فعال می‌ماند`);
+    } catch (error) {
+      console.error('❌ پینگ ناموفق:', error.message);
+      setTimeout(performPing, 2 * 60 * 1000);
+    }
+  };
+
+  setTimeout(performPing, 30000);
+  setInterval(performPing, PING_INTERVAL);
+};
+
+// endpoint پینگ
+app.get('/ping', (req, res) => {
+  console.log('🏓 دریافت پینگ - ربات فعال است');
+  res.status(200).json({
+    status: 'active',
+    botId: SELF_BOT_ID,
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()) + ' ثانیه',
+    message: 'ربات فعال و بیدار است 🚀'
+  });
+});
+
 // توابع کمکی
 const formatTime = (seconds) => {
   if (seconds < 60) return `${seconds} ثانیه`;
@@ -270,7 +313,7 @@ const handleTrigger = async (ctx, triggerType) => {
     }
 
     const formattedTime = formatTime(delay);
-    const triggerEmoji = triggerType === 'ورود' ? '🎴' : triggerType === 'ماشین' ? '🚗' : '🏍️';
+    const triggerEmoji = triggerType === 'ورود' ? '🎴' : triggerType === 'ماشین' ? '🚗' : '��️';
     
     let initialMessage;
     if (triggerType === 'ورود') {
@@ -322,14 +365,11 @@ const handleTrigger = async (ctx, triggerType) => {
 };
 
 // ==================[ دستورات ربات ]==================
-
-// دستور start
 bot.start((ctx) => {
   console.log(`🚀 دستور start توسط کاربر ${ctx.from.id} فراخوانی شد`);
   ctx.reply('اوپراتور اکلیس درخدمت شماست 🥷🏻');
 });
 
-// دستور help
 bot.command('help', (ctx) => {
   console.log(`📖 دستور help توسط کاربر ${ctx.from.id} فراخوانی شد`);
   ctx.reply(`
@@ -339,7 +379,7 @@ bot.command('help', (ctx) => {
 /status - بررسی وضعیت ربات در گروه
 /set_t1 - تنظیم تریگر برای #ورود
 /set_t2 - تنظیم تریگر برای #ماشین  
-/set_t3 - تنظیم تریگر برای #موتور
+/set_t3 - تنظی�� تریگر برای #موتور
 /help - نمایش این راهنما
 
 #ورود - فعال کردن تریگر ورود
@@ -349,7 +389,6 @@ bot.command('help', (ctx) => {
   `);
 });
 
-// دستور status
 bot.command('status', async (ctx) => {
   console.log(`📊 دستور status توسط کاربر ${ctx.from.id} فراخوانی شد`);
   try {
@@ -419,8 +458,6 @@ bot.command('set_t2', (ctx) => setupTrigger(ctx, 'ماشین'));
 bot.command('set_t3', (ctx) => setupTrigger(ctx, 'موتور'));
 
 // ==================[ پردازش پیام‌ها ]==================
-
-// پردازش تریگرها از پیام‌ها
 bot.on('text', async (ctx) => {
   try {
     const messageText = ctx.message.text;
@@ -554,10 +591,7 @@ app.post('/api/sync-release', async (req, res) => {
 });
 
 // ==================[ راه‌اندازی سرور ]==================
-
-// استفاده از webhook callback (مشابه ربات قرنطینه)
 app.use(bot.webhookCallback('/webhook'));
-
 app.get('/', (req, res) => {
   res.send(`🤖 ربات تلگرام ${SELF_BOT_ID} در حال اجراست!`);
 });
@@ -567,9 +601,12 @@ app.listen(PORT, () => {
   console.log(`🤖 شناسه ربات: ${SELF_BOT_ID}`);
   console.log(`🔗 حالت هماهنگی: ${SYNC_ENABLED ? 'فعال' : 'غیرفعال'}`);
   console.log(`👥 تعداد ربات‌های متصل: ${BOT_INSTANCES.length}`);
+  
+  // شروع پینگ خودکار
+  startAutoPing();
 });
 
-// راه‌اندازی ربات (مشابه ربات قرنطینه)
+// راه‌اندازی ربات
 if (process.env.RENDER_EXTERNAL_URL) {
   const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
   console.log(`🌐 تنظیم Webhook: ${webhookUrl}`);
