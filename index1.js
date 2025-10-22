@@ -122,11 +122,11 @@ app.get('/ping', (req, res) => {
     botId: SELF_BOT_ID,
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()) + ' ثانیه',
-    message: 'ربات فعال و بیدار است 🚀'
+    message: 'ربات تریگر فعال و بیدار است 🚀'
   });
 });
 
-// توابع کمکی
+// ==================[ توابع کمکی ]==================
 const formatTime = (seconds) => {
   if (seconds < 60) return `${seconds} ثانیه`;
   const minutes = Math.floor(seconds / 60);
@@ -181,7 +181,7 @@ const releaseUserFromQuarantine = async (userId) => {
         
         const response = await axios.post(`${apiUrl}/api/release-user`, {
           userId: userId,
-          secretKey: botInstance.secretKey,
+          secretKey: botInstance.secretKey || API_SECRET_KEY,
           sourceBot: SELF_BOT_ID
         }, { 
           timeout: 8000,
@@ -274,7 +274,7 @@ app.post('/api/release-user', async (req, res) => {
     
     // بررسی کلید امنیتی
     if (!secretKey || secretKey !== API_SECRET_KEY) {
-      console.warn('❌ درخواست ��یرمجاز برای آزادسازی کاربر');
+      console.warn('❌ درخواست غیرمجاز برای آزادسازی کاربر');
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
@@ -319,6 +319,33 @@ app.post('/api/check-quarantine', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ خطا در endpoint بررسی قرنطینه:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ==================[ endpoint جدید برای هماهنگی - حیاتی ]==================
+app.post('/api/sync-user', async (req, res) => {
+  try {
+    const { userId, chatId, action, secretKey, sourceBot } = req.body;
+    
+    if (!secretKey || secretKey !== API_SECRET_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    console.log(`🔄 درخواست هماهنگی از ${sourceBot} برای کاربر ${userId} - عمل: ${action}`);
+    
+    // این ربات تریگر است، پس کاربر را قرنطینه یا آزاد نمی‌کند
+    // فقط تأیید می‌کند که درخواست دریافت شده
+    res.status(200).json({
+      success: true,
+      botId: SELF_BOT_ID,
+      processed: true,
+      message: `درخواست ${action} برای کاربر ${userId} دریافت شد`,
+      note: 'این ربات تریگر است و کاربران را قرنطینه نمی‌کند'
+    });
+    
+  } catch (error) {
+    console.error('❌ خطا در endpoint هماهنگی:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -414,7 +441,7 @@ const handleTrigger = async (ctx, triggerType) => {
     if (triggerType === 'ورود') {
       initialMessage = `${triggerEmoji}┊پلیر ${userName} وارد منطقه ${chatTitle} شدید\n\n⏳┊زمان سفر شما ${formattedTime}`;
     } else if (triggerType === 'ماشین') {
-      initialMessage = `${triggerEmoji}┊ماشین ${userName} وارد گاراژ شد\n\n⏳┊زم��ن آماده سازی ${formattedTime}`;
+      initialMessage = `${triggerEmoji}┊ماشین ${userName} وارد گاراژ شد\n\n⏳┊زمان آماده سازی ${formattedTime}`;
     } else {
       initialMessage = `${triggerEmoji}┊موتور ${userName} وارد گاراژ شد\n\n⏳┊زمان آماده سازی ${formattedTime}`;
     }
@@ -542,7 +569,10 @@ const setupTrigger = async (ctx, triggerType) => {
     ctx.session.chatId = ctx.chat.id;
 
     const triggerEmoji = triggerType === 'ورود' ? '🚪' : triggerType === 'ماشین' ? '🚗' : '🏍️';
-    await ctx.reply(`${triggerEmoji} تنظیم تریگر برای #${triggerType}\n\n⏰ لطفاً زمان تأخیر را به ثانیه وارد کنید:\nمثال: 60 (برای 1 دقیقه)`);
+    await ctx.reply(`${triggerEmoji} تنظیم تریگر برای #${triggerType}
+
+⏰ لطفاً زمان تأخیر را به ثانیه وارد کنید:
+مثال: 60 (برای 1 دقیقه)`);
   } catch (error) {
     console.error('خطا در دستور set_t:', error);
     ctx.reply('❌ خطایی در تنظیم تریگر رخ داد.');
@@ -599,7 +629,9 @@ bot.on('text', async (ctx) => {
       const triggerEmoji = ctx.session.triggerType === 'ورود' ? '🚪' : 
                           ctx.session.triggerType === 'ماشین' ? '🚗' : '🏍️';
       
-      await ctx.reply(`${triggerEmoji} زمان تأخیر ثبت شد: ${formatTime(delay)}\n\n📝 حالا پیام تأخیری را ارسال کنید:`);
+      await ctx.reply(`${triggerEmoji} زمان تأخیر ثبت شد: ${formatTime(delay)}
+
+📝 حالا پیام تأخیری را ارسال کنید:`);
     } else if (ctx.session.step === 'message') {
       try {
         const messageEntities = ctx.message.entities || [];
@@ -627,7 +659,9 @@ bot.on('text', async (ctx) => {
         const triggerEmoji = ctx.session.triggerType === 'ورود' ? '🚪' : 
                             ctx.session.triggerType === 'ماشین' ? '🚗' : '🏍️';
         
-        ctx.reply(`${triggerEmoji} تریگر #${ctx.session.triggerType} با موفقیت تنظیم شد!\n\n✅ تریگر قبلی جایگزین شد.`);
+        ctx.reply(`${triggerEmoji} تریگر #${ctx.session.triggerType} با موفقیت تنظیم شد!
+
+✅ تریگر قبلی جایگزین شد.`);
       } catch (error) {
         console.error('❌ خطای دیتابیس:', error);
         ctx.reply('❌ خطایی در ذخیره تنظیمات رخ داد.');
