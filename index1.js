@@ -4,7 +4,6 @@ const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
 
-// ==================[ تنظیمات اولیه ]==================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -15,12 +14,10 @@ const BOT_INSTANCES = process.env.BOT_INSTANCES ? JSON.parse(process.env.BOT_INS
 const SELF_BOT_ID = process.env.SELF_BOT_ID || 'trigger_1';
 const SYNC_ENABLED = process.env.SYNC_ENABLED === 'true';
 
-// کش فوق بهینه
 const cache = new NodeCache({ 
   stdTTL: 1800,
   checkperiod: 600,
-  maxKeys: 3000,
-  useClones: false
+  maxKeys: 3000
 });
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -38,91 +35,52 @@ bot.use(session({
   })
 }));
 
-// ==================[ پینگ بهینه ]==================
-const startAutoPing = () => {
-  if (!process.env.RENDER_EXTERNAL_URL) return;
-  const PING_INTERVAL = 14 * 60 * 1000;
-  const selfUrl = process.env.RENDER_EXTERNAL_URL;
-
-  const performPing = async () => {
-    try {
-      await axios.head(`${selfUrl}/ping`, { timeout: 5000 });
-    } catch (error) {
-      setTimeout(performPing, 2 * 60 * 1000);
-    }
-  };
-
-  setTimeout(performPing, 45000);
-  setInterval(performPing, PING_INTERVAL);
-};
-
-app.head('/ping', (req, res) => res.status(200).end());
-app.get('/ping', (req, res) => {
-  res.status(200).json({ status: 'active', botId: SELF_BOT_ID });
-});
-
-// ==================[ تابع آزادسازی - کاملاً بازنویسی شده ]==================
+// تابع آزادسازی - کاملاً بازنویسی شده
 const releaseUserFromQuarantine = async (userId) => {
   try {
     if (!SYNC_ENABLED) {
-      console.log(`🔕 سینک غیرفعال - آزادسازی کاربر ${userId} انجام نشد`);
+      console.log(`سینک غیرفعال - آزادسازی کاربر ${userId} انجام نشد`);
       return false;
-    }
-
-    const cacheKey = `release:${userId}`;
-    const cachedResult = cache.get(cacheKey);
-    if (cachedResult !== undefined) {
-      console.log(`✅ استفاده از کش برای آزادسازی کاربر ${userId}`);
-      return cachedResult;
     }
 
     const quarantineBots = BOT_INSTANCES.filter(bot => bot.type === 'quarantine');
     if (quarantineBots.length === 0) {
-      console.log('⚠️ هیچ ربات قرنطینه‌ای برای آزادسازی پیدا نشد');
+      console.log('هیچ ربات قرنطینه‌ای برای آزادسازی پیدا نشد');
       return false;
     }
 
+    console.log(`آزادسازی کاربر ${userId} از ${quarantineBots.length} ربات قرنطینه`);
+
     let successCount = 0;
-    const promises = quarantineBots.map(async (botInstance) => {
+    
+    // به همه ربات‌های قرنطینه اطلاع بده
+    for (const botInstance of quarantineBots) {
       try {
         let apiUrl = botInstance.url;
         if (!apiUrl.startsWith('http')) apiUrl = `https://${apiUrl}`;
         
-        // استفاده از داده فشرده برای کاهش Egress
         const response = await axios.post(`${apiUrl}/api/release-user`, {
-          u: userId,
-          s: botInstance.secretKey || API_SECRET_KEY,
-          b: SELF_BOT_ID
-        }, { 
-          timeout: 8000,
-          headers: { 'X-Compressed': 'true' }
-        });
+          userId: userId,
+          secretKey: botInstance.secretKey || API_SECRET_KEY,
+          sourceBot: SELF_BOT_ID
+        }, { timeout: 10000 }); // افزایش تایم‌اوت
 
-        if (response.data && response.data.s) {
-          console.log(`✅ کاربر ${userId} از ربات ${botInstance.id} آزاد شد`);
-          return true;
+        if (response.data.success) {
+          console.log(`کاربر ${userId} از ربات ${botInstance.id} آزاد شد`);
+          successCount++;
         }
-        return false;
       } catch (error) {
-        console.log(`❌ خطا در آزادسازی از ${botInstance.id}:`, error.message);
-        return false;
+        console.log(`خطا در آزادسازی از ${botInstance.id}:`, error.message);
       }
-    });
+    }
 
-    const results = await Promise.allSettled(promises);
-    successCount = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
-
-    const finalResult = successCount > 0;
-    cache.set(cacheKey, finalResult, 600);
-    
-    console.log(`🎯 آزادسازی کاربر ${userId}: ${successCount}/${quarantineBots.length} موفق`);
-    return finalResult;
+    console.log(`آزادسازی کاربر ${userId}: ${successCount}/${quarantineBots.length} موفق`);
+    return successCount > 0;
   } catch (error) {
-    console.error('❌ خطای کلی در آزادسازی:', error);
+    console.error('خطای کلی در آزادسازی:', error);
     return false;
   }
 };
-
 // ==================[ تابع handleTrigger - اصلاح شده ]==================
 const handleTrigger = async (ctx, triggerType) => {
   try {
