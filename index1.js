@@ -228,16 +228,18 @@ const handleTrigger = async (ctx, triggerType) => {
     });
 
     setTimeout(async () => {
-      try {
-        // ایجاد پیام فرمت‌شده
-        const formattedMessage = createFormattedMessage(delayedMessage, messageEntities);
-        
-        const messageOptions = {
-          reply_to_message_id: ctx.message.message_id,
-          ...createGlassButton(),
-          ...formattedMessage
-        };
-
+  try {
+    await ctx.telegram.sendMessage(ctx.chat.id, delayedMessage, {
+      reply_to_message_id: ctx.message.message_id,
+      ...createGlassButton(),
+      disable_web_page_preview: true // این خط را اضافه کنید
+    });
+    // ... بقیه کد
+  } catch (error) {
+    console.log('خطا در ارسال پیام تأخیری:', error.message);
+  }
+}, delay * 1000);
+    
         await ctx.telegram.sendMessage(ctx.chat.id, formattedMessage.text, messageOptions);
         
         // آزادسازی کاربر بدون نمایش پیام
