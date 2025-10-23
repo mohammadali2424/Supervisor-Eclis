@@ -102,23 +102,83 @@ const releaseUserFromQuarantine = async (userId) => {
   }
 };
 
-// ==================[ تابع استخراج محتوا ]==================
+// ==================[ تابع استخراج محتوا - کاملاً اصلاح شده ]==================
 const extractMessageContent = (ctx) => {
+  let text = '';
+  let entities = [];
+  
   if (ctx.message.text) {
-    return {
-      text: ctx.message.text,
-      entities: ctx.message.entities || []
-    };
+    text = ctx.message.text;
+    entities = ctx.message.entities || [];
   } else if (ctx.message.caption) {
-    return {
-      text: ctx.message.caption,
-      entities: ctx.message.caption_entities || []
-    };
+    text = ctx.message.caption;
+    entities = ctx.message.caption_entities || [];
   }
-  return { text: '', entities: [] };
+  
+  return { text, entities };
 };
 
-// ==================[ تابع handleTrigger ]==================
+// ==================[ تابع ایجاد فرمت پیام - جدید ]==================
+const createFormattedMessage = (text, entities) => {
+  if (!entities || entities.length === 0) {
+    return { text, parse_mode: undefined };
+  }
+
+  // اگر entities داریم، از HTML parse mode استفاده می‌کنیم
+  let formattedText = text;
+  
+  // مرتب کردن entities بر اساس offset به صورت نزولی
+  const sortedEntities = [...entities].sort((a, b) => b.offset - a.offset);
+  
+  // اعمال entities به متن
+  sortedEntities.forEach(entity => {
+    const { offset, length, type } = entity;
+    const start = offset;
+    const end = offset + length;
+    const entityText = text.substring(start, end);
+    
+    let wrappedText = entityText;
+    
+    switch (type) {
+      case 'bold':
+        wrappedText = `<b>${entityText}</b>`;
+        break;
+      case 'italic':
+        wrappedText = `<i>${entityText}</i>`;
+        break;
+      case 'underline':
+        wrappedText = `<u>${entityText}</u>`;
+        break;
+      case 'strikethrough':
+        wrappedText = `<s>${entityText}</s>`;
+        break;
+      case 'code':
+        wrappedText = `<code>${entityText}</code>`;
+        break;
+      case 'pre':
+        wrappedText = `<pre>${entityText}</pre>`;
+        break;
+      case 'text_link':
+        wrappedText = `<a href="${entity.url}">${entityText}</a>`;
+        break;
+      case 'text_mention':
+        wrappedText = `<a href="tg://user?id=${entity.user.id}">${entityText}</a>`;
+        break;
+      default:
+        wrappedText = entityText;
+    }
+    
+    formattedText = formattedText.substring(0, start) + wrappedText + formattedText.substring(end);
+  });
+
+  return { 
+    text: formattedText, 
+    parse_mode: 'HTML',
+    disable_web_page_preview: false // اجازه نمایش پیش‌نمایش لینک
+  };
+};
+
+// ==================[ تابع handleTrigger - کاملاً اصلاح شده ]==================
 const handleTrigger = async (ctx, triggerType) => {
   try {
     if (ctx.chat.type === 'private') return;
@@ -141,7 +201,7 @@ const handleTrigger = async (ctx, triggerType) => {
       try {
         const { data } = await supabase
           .from('triggers')
-          .select('delay, delayed_message')
+          .select('delay, delayed_message, message_entities')
           .eq('chat_id', ctx.chat.id)
           .eq('trigger_type', triggerType)
           .single();
@@ -150,11 +210,14 @@ const handleTrigger = async (ctx, triggerType) => {
           triggerData = data;
           cache.set(cacheKey, data, 3600);
         }
-      } catch (error) {}
+      } catch (error) {
+        console.log('خطا در دریافت داده از دیتابیس:', error.message);
+      }
     }
 
     const delay = triggerData?.delay || 5;
     const delayedMessage = triggerData?.delayed_message || 'عملیات تکمیل شد! ✅';
+    const messageEntities = triggerData?.message_entities || [];
     const triggerEmoji = triggerType === 'ورود' ? '🎴' : triggerType === 'ماشین' ? '🚗' : '🏍️';
     
     const initialMessage = `${triggerEmoji}┊${userName} وارد منطقه شد\n\n⏳┊زمان: ${formatTime(delay)}`;
@@ -166,13 +229,16 @@ const handleTrigger = async (ctx, triggerType) => {
 
     setTimeout(async () => {
       try {
+        // ایجاد پیام فرمت‌شده
+        const formattedMessage = createFormattedMessage(delayedMessage, messageEntities);
+        
         const messageOptions = {
           reply_to_message_id: ctx.message.message_id,
           ...createGlassButton(),
-          disable_web_page_preview: true
+          ...formattedMessage
         };
 
-        await ctx.telegram.sendMessage(ctx.chat.id, delayedMessage, messageOptions);
+        await ctx.telegram.sendMessage(ctx.chat.id, formattedMessage.text, messageOptions);
         
         // آزادسازی کاربر بدون نمایش پیام
         console.log(`🕒 تایمر برای کاربر ${userId} به پایان رسید، شروع آزادسازی...`);
@@ -308,7 +374,7 @@ bot.command('set_t1', (ctx) => setupTrigger(ctx, 'ورود'));
 bot.command('set_t2', (ctx) => setupTrigger(ctx, 'ماشین'));
 bot.command('set_t3', (ctx) => setupTrigger(ctx, 'موتور'));
 
-// ==================[ پردازش پیام‌ها ]==================
+// ==================[ پردازش پیام‌ها - کاملاً اصلاح شده ]==================
 bot.on('text', async (ctx) => {
   try {
     const text = ctx.message.text;
@@ -343,7 +409,7 @@ bot.on('text', async (ctx) => {
           .eq('chat_id', ctx.session.chatId)
           .eq('trigger_type', ctx.session.triggerType);
 
-        // استفاده از تابع استخراج محتوا برای ذخیره پیام کامل
+        // استخراج کامل محتوا شامل متن و entities
         const messageContent = extractMessageContent(ctx);
         
         await supabase.from('triggers').insert({
@@ -351,6 +417,7 @@ bot.on('text', async (ctx) => {
           trigger_type: ctx.session.triggerType,
           delay: ctx.session.delay,
           delayed_message: messageContent.text,
+          message_entities: messageContent.entities, // ذخیره entities
           updated_at: new Date().toISOString()
         });
 
@@ -360,6 +427,7 @@ bot.on('text', async (ctx) => {
                      ctx.session.triggerType === 'ماشین' ? '🚗' : '🏍️';
         ctx.reply(`${emoji} تریگر #${ctx.session.triggerType} تنظیم شد!`);
       } catch (error) {
+        console.log('خطا در ذخیره:', error);
         ctx.reply('❌ خطا در ذخیره');
       }
       ctx.session.settingTrigger = false;
