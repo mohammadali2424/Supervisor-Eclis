@@ -102,7 +102,7 @@ const releaseUserFromQuarantine = async (userId) => {
   }
 };
 
-// ==================[ تابع استخراج محتوا - کاملاً اصلاح شده ]==================
+// ==================[ تابع استخراج محتوا ]==================
 const extractMessageContent = (ctx) => {
   let text = '';
   let entities = [];
@@ -118,10 +118,14 @@ const extractMessageContent = (ctx) => {
   return { text, entities };
 };
 
-// ==================[ تابع ایجاد فرمت پیام - جدید ]==================
+// ==================[ تابع ایجاد فرمت پیام - اصلاح شده ]==================
 const createFormattedMessage = (text, entities) => {
   if (!entities || entities.length === 0) {
-    return { text, parse_mode: undefined };
+    return { 
+      text: text, 
+      parse_mode: undefined,
+      disable_web_page_preview: true // پیش‌نمایش غیرفعال
+    };
   }
 
   // اگر entities داریم، از HTML parse mode استفاده می‌کنیم
@@ -174,11 +178,11 @@ const createFormattedMessage = (text, entities) => {
   return { 
     text: formattedText, 
     parse_mode: 'HTML',
-    disable_web_page_preview: false // اجازه نمایش پیش‌نمایش لینک
+    disable_web_page_preview: true // پیش‌نمایش غیرفعال اما فرمت‌ها فعال
   };
 };
 
-// ==================[ تابع handleTrigger - کاملاً اصلاح شده ]==================
+// ==================[ تابع handleTrigger - اصلاح شده ]==================
 const handleTrigger = async (ctx, triggerType) => {
   try {
     if (ctx.chat.type === 'private') return;
@@ -228,13 +232,16 @@ const handleTrigger = async (ctx, triggerType) => {
     });
 
     setTimeout(async () => {
-  try {
-    await ctx.telegram.sendMessage(ctx.chat.id, delayedMessage, {
-      reply_to_message_id: ctx.message.message_id,
-      ...createGlassButton(),
-      disable_web_page_preview: true // این خط را اضافه کنید
-    });
-    
+      try {
+        // ایجاد پیام فرمت‌شده با پیش‌نمایش غیرفعال
+        const formattedMessage = createFormattedMessage(delayedMessage, messageEntities);
+        
+        const messageOptions = {
+          reply_to_message_id: ctx.message.message_id,
+          ...createGlassButton(),
+          ...formattedMessage
+        };
+
         await ctx.telegram.sendMessage(ctx.chat.id, formattedMessage.text, messageOptions);
         
         // آزادسازی کاربر بدون نمایش پیام
@@ -371,7 +378,7 @@ bot.command('set_t1', (ctx) => setupTrigger(ctx, 'ورود'));
 bot.command('set_t2', (ctx) => setupTrigger(ctx, 'ماشین'));
 bot.command('set_t3', (ctx) => setupTrigger(ctx, 'موتور'));
 
-// ==================[ پردازش پیام‌ها - کاملاً اصلاح شده ]==================
+// ==================[ ��ردازش پیام‌ها ]==================
 bot.on('text', async (ctx) => {
   try {
     const text = ctx.message.text;
@@ -414,7 +421,7 @@ bot.on('text', async (ctx) => {
           trigger_type: ctx.session.triggerType,
           delay: ctx.session.delay,
           delayed_message: messageContent.text,
-          message_entities: messageContent.entities, // ذخیره entities
+          message_entities: messageContent.entities,
           updated_at: new Date().toISOString()
         });
 
