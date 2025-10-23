@@ -9,7 +9,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const PORT = process.env.PORT || 3000;
-const OWNER_ID = process.env.OWNER_ID;
+const OWNER_ID = parseInt(process.env.OWNER_ID) || 0;
 const API_SECRET_KEY = process.env.API_SECRET_KEY;
 const BOT_INSTANCES = process.env.BOT_INSTANCES ? JSON.parse(process.env.BOT_INSTANCES) : [];
 const SELF_BOT_ID = process.env.SELF_BOT_ID || 'trigger_1';
@@ -17,9 +17,9 @@ const SYNC_ENABLED = process.env.SYNC_ENABLED === 'true';
 
 // کش پیشرفته برای تریگرها
 const cache = new NodeCache({ 
-  stdTTL: 600,        // 10 دقیقه
-  checkperiod: 120,
-  maxKeys: 10000
+  stdTTL: 900,
+  checkperiod: 300,
+  maxKeys: 5000
 });
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -49,7 +49,9 @@ const startAutoPing = () => {
   const performPing = async () => {
     try {
       await axios.get(`${selfUrl}/ping`, { timeout: 10000 });
+      console.log('✅ پینگ موفق - تریگر');
     } catch (error) {
+      console.log('❌ پینگ ناموفق - تریگر');
       setTimeout(performPing, 2 * 60 * 1000);
     }
   };
@@ -76,10 +78,13 @@ const formatTime = (seconds) => {
 
 const checkUserAccess = async (ctx) => {
   try {
-    if (ctx.from.id.toString() === OWNER_ID) return { hasAccess: true, isOwner: true };
+    const userId = ctx.from.id;
+    
+    if (userId === OWNER_ID) return { hasAccess: true, isOwner: true };
+    
     if (ctx.chat.type === 'private') return { hasAccess: false, reason: 'این دستور فقط در گروه کار می‌کند' };
 
-    const member = await ctx.getChatMember(ctx.from.id);
+    const member = await ctx.getChatMember(userId);
     if (member.status === 'creator') return { hasAccess: true, isCreator: true };
     if (member.status === 'administrator') return { hasAccess: true, isAdmin: true };
 
@@ -89,14 +94,14 @@ const checkUserAccess = async (ctx) => {
   }
 };
 
-// ==================[ توابع آزادسازی - با کش ]==================
+// ==================[ تابع آزادسازی کاربر - کاملاً اصلاح شده ]==================
 const releaseUserFromQuarantine = async (userId) => {
   try {
     if (!SYNC_ENABLED) {
+      console.log(`🔕 سینک غیرفعال - آزادسازی کاربر ${userId} انجام نشد`);
       return false;
     }
 
-    // کش برای نتایج آزادسازی
     const cacheKey = `release:${userId}`;
     const cachedResult = cache.get(cacheKey);
     if (cachedResult !== undefined) {
@@ -105,22 +110,34 @@ const releaseUserFromQuarantine = async (userId) => {
     }
 
     const quarantineBots = BOT_INSTANCES.filter(bot => bot.type === 'quarantine');
+    
+    if (quarantineBots.length === 0) {
+      console.log('⚠️ هیچ ربات قرنطینه‌ای برای آزادسازی پیدا نشد');
+      return false;
+    }
+
     let successCount = 0;
 
-    // غیرهمزمان اجرا کن تا Egress کمتری مصرف شه
+    console.log(`🔓 درحال آزادسازی کاربر ${userId} از ${quarantineBots.length} ربات قرنطینه`);
+
     const promises = quarantineBots.map(async (botInstance) => {
       try {
         let apiUrl = botInstance.url;
         if (!apiUrl.startsWith('http')) apiUrl = `https://${apiUrl}`;
         
-        await axios.post(`${apiUrl}/api/release-user`, {
+        const response = await axios.post(`${apiUrl}/api/release-user`, {
           userId: userId,
           secretKey: botInstance.secretKey || API_SECRET_KEY,
           sourceBot: SELF_BOT_ID
-        }, { timeout: 5000 });
-        
-        return true;
+        }, { timeout: 8000 });
+
+        if (response.data.success) {
+          console.log(`✅ کاربر ${userId} از ربات ${botInstance.id} آزاد شد`);
+          return true;
+        }
+        return false;
       } catch (error) {
+        console.log(`❌ خطا در آزادسازی از ${botInstance.id}:`, error.message);
         return false;
       }
     });
@@ -129,22 +146,26 @@ const releaseUserFromQuarantine = async (userId) => {
     successCount = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
 
     const finalResult = successCount > 0;
-    // نتیجه رو در کش ذخیره کن (2 دقیقه)
-    cache.set(cacheKey, finalResult, 120);
+    
+    cache.set(cacheKey, finalResult, 300);
+    
+    console.log(`🎯 آزادسازی کاربر ${userId}: ${successCount}/${quarantineBots.length} موفق`);
     
     return finalResult;
   } catch (error) {
+    console.error('❌ خطای کلی در آزادسازی:', error);
     return false;
   }
 };
 
-// ==================[ تابع handleTrigger - با کش ]==================
+// ==================[ تابع handleTrigger - کاملاً اصلاح شده ]==================
 const handleTrigger = async (ctx, triggerType) => {
   try {
     if (ctx.chat.type === 'private') return;
 
     const userName = ctx.from.first_name || 'ناشناس';
     const chatTitle = ctx.chat.title || 'گروه ناشناخته';
+    const userId = ctx.from.id;
     
     if (triggerType === 'خروج') {
       const exitMessage = `🧭┊سفر به سلامت ${userName}`;
@@ -155,26 +176,26 @@ const handleTrigger = async (ctx, triggerType) => {
       return;
     }
     
-    // 🔍 اول از کش تریگرها رو بگیر
     const cacheKey = `trigger:${ctx.chat.id}:${triggerType}`;
     let triggerData = cache.get(cacheKey);
     
     if (!triggerData) {
-      // اگر در کش نبود، از دیتابیس بگیر
       try {
-        const { data } = await supabase
+        const { data, error } = await supabase
           .from('triggers')
           .select('delay, delayed_message, message_entities')
           .eq('chat_id', ctx.chat.id)
           .eq('trigger_type', triggerType)
           .single();
 
+        if (error) throw error;
+
         if (data) {
           triggerData = data;
-          cache.set(cacheKey, data, 600); // 10 دقیقه
+          cache.set(cacheKey, data, 900);
         }
       } catch (error) {
-        // خطا رو لاگ نکن تا Egress کمتری مصرف بشه
+        console.log(`⚠️ تریگر برای #${triggerType} پیدا نشد`);
       }
     }
 
@@ -199,6 +220,8 @@ const handleTrigger = async (ctx, triggerType) => {
       ...createGlassButton()
     });
 
+    console.log(`⏰ تریگر #${triggerType} برای کاربر ${userId} فعال شد - تأخیر: ${delay}ثانیه`);
+
     setTimeout(async () => {
       try {
         const messageOptions = {
@@ -213,16 +236,22 @@ const handleTrigger = async (ctx, triggerType) => {
         
         await ctx.telegram.sendMessage(ctx.chat.id, delayedMessage, messageOptions);
         
-        // آزادسازی کاربر از قرنطینه
-        await releaseUserFromQuarantine(ctx.from.id);
+        console.log(`🔓 درحال آزادسازی کاربر ${userId} از قرنطینه...`);
+        
+        const releaseResult = await releaseUserFromQuarantine(userId);
+        
+        if (releaseResult) {
+          console.log(`✅ کاربر ${userId} با موفقیت از قرنطینه آزاد شد`);
+        } else {
+          console.log(`⚠️ کاربر ${userId} آزادسازی نشد (ممکن است در قرنطینه نباشد)`);
+        }
         
       } catch (error) {
-        // خطا رو لاگ نکن
+        console.error(`❌ خطا در ارسال پیام تأخیری:`, error.message);
       }
     }, delay * 1000);
   } catch (error) {
-    // خطای اصلی رو لاگ کن
-    console.error(`❌ خطا در پردازش #${triggerType}:`, error);
+    console.error(`❌ خطا در پردازش #${triggerType}:`, error.message);
   }
 };
 
@@ -266,6 +295,7 @@ bot.command('help', (ctx) => {
 /set_t1 - تنظیم تریگر برای #ورود
 /set_t2 - تنظیم تریگر برای #ماشین  
 /set_t3 - تنظیم تریگر برای #موتور
+/off - غیرفعال کردن ربات در گروه
 /help - نمایش این راهنما
 
 #ورود - فعال کردن تریگر ورود
@@ -285,7 +315,6 @@ bot.command('status', async (ctx) => {
 
     let triggerInfo = '\n⚙️ تنظیمات تریگرها:';
     
-    // از کش تریگرها رو بگیر
     const chatTriggersCache = cache.get(`triggers:${ctx.chat.id}`);
     if (chatTriggersCache) {
       chatTriggersCache.forEach(trigger => {
@@ -294,12 +323,13 @@ bot.command('status', async (ctx) => {
         triggerInfo += `\n${emoji} #${trigger.trigger_type}: ${formatTime(trigger.delay)}`;
       });
     } else {
-      // اگر در کش نبود، از دیتابیس بگیر
       try {
-        const { data: triggers } = await supabase
+        const { data: triggers, error } = await supabase
           .from('triggers')
           .select('trigger_type, delay')
           .eq('chat_id', ctx.chat.id);
+
+        if (error) throw error;
 
         if (triggers && triggers.length > 0) {
           triggers.forEach(trigger => {
@@ -307,8 +337,7 @@ bot.command('status', async (ctx) => {
                          trigger.trigger_type === 'ماشین' ? '🚗' : '🏍️';
             triggerInfo += `\n${emoji} #${trigger.trigger_type}: ${formatTime(trigger.delay)}`;
           });
-          // در کش ذخیره کن
-          cache.set(`triggers:${ctx.chat.id}`, triggers, 600);
+          cache.set(`triggers:${ctx.chat.id}`, triggers, 900);
         } else {
           triggerInfo += '\n❌ هیچ تریگری تنظیم نشده است';
         }
@@ -322,9 +351,48 @@ bot.command('status', async (ctx) => {
 ${triggerInfo}
 
 🔗 وضعیت ارتباط با ربات‌های قرنطینه: ${SYNC_ENABLED ? 'فعال' : 'غیرفعال'}
+👤 مالک ربات: ${OWNER_ID}
     `);
   } catch (error) {
     ctx.reply('❌ خطا در بررسی وضعیت');
+  }
+});
+
+// ==================[ دستور جدید: /off ]==================
+bot.command('off', async (ctx) => {
+  try {
+    const userAccess = await checkUserAccess(ctx);
+    
+    if (!userAccess.isOwner && !userAccess.isCreator) {
+      ctx.reply('❌ فقط مالک ربات یا سازنده گروه می‌تواند ربات را غیرفعال کند.');
+      return;
+    }
+
+    const chatId = ctx.chat.id;
+    
+    const { error: deleteError } = await supabase
+      .from('triggers')
+      .delete()
+      .eq('chat_id', chatId);
+
+    if (deleteError) throw deleteError;
+
+    cache.del(`triggers:${chatId}`);
+    cache.del(`trigger:${chatId}:ورود`);
+    cache.del(`trigger:${chatId}:ماشین`);
+    cache.del(`trigger:${chatId}:موتور`);
+
+    ctx.reply('✅ ربات با موفقیت غیرفعال شد و تمام تریگرهای این گروه حذف شدند.');
+    
+    try {
+      await ctx.leaveChat();
+    } catch (leaveError) {
+      console.log('⚠️ خطا در خروج از گروه:', leaveError.message);
+    }
+    
+  } catch (error) {
+    console.error('❌ خطا در غیرفعال کردن ربات:', error);
+    ctx.reply('❌ خطایی در غیرفعال کردن ربات رخ داد.');
   }
 });
 
@@ -371,7 +439,6 @@ bot.on('text', async (ctx) => {
       await handleTrigger(ctx, 'خروج');
     }
 
-    // پردازش تنظیمات تریگر
     if (!ctx.session.settingTrigger) return;
 
     const userAccess = await checkUserAccess(ctx);
@@ -399,13 +466,15 @@ bot.on('text', async (ctx) => {
       try {
         const messageEntities = ctx.message.entities || [];
         
-        await supabase
+        const { error: deleteError } = await supabase
           .from('triggers')
           .delete()
           .eq('chat_id', ctx.session.chatId)
           .eq('trigger_type', ctx.session.triggerType);
 
-        await supabase.from('triggers').insert({
+        if (deleteError) throw deleteError;
+
+        const { error: insertError } = await supabase.from('triggers').insert({
           chat_id: ctx.session.chatId,
           trigger_type: ctx.session.triggerType,
           delay: ctx.session.delay,
@@ -416,7 +485,8 @@ bot.on('text', async (ctx) => {
           set_by_username: ctx.from.username || ctx.from.first_name
         });
 
-        // کش رو پاک کن
+        if (insertError) throw insertError;
+
         cache.del(`trigger:${ctx.session.chatId}:${ctx.session.triggerType}`);
         cache.del(`triggers:${ctx.session.chatId}`);
 
@@ -425,13 +495,14 @@ bot.on('text', async (ctx) => {
         
         ctx.reply(`${triggerEmoji} تریگر #${ctx.session.triggerType} با موفقیت تنظیم شد!\n\n✅ تریگر قبلی جایگزین شد.`);
       } catch (error) {
+        console.error('❌ خطا در ذخیره تریگر:', error);
         ctx.reply('❌ خطایی در ذخیره تنظیمات رخ داد.');
       }
 
       ctx.session.settingTrigger = false;
     }
   } catch (error) {
-    console.error('خطا در پردازش پیام:', error);
+    console.error('❌ خطا در پردازش پیام:', error);
   }
 });
 
@@ -444,7 +515,6 @@ app.post('/api/check-quarantine', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    // ربات تریگر کاربر رو قرنطینه نمی‌کنه
     res.status(200).json({ 
       isQuarantined: false,
       botId: SELF_BOT_ID,
@@ -463,7 +533,6 @@ app.post('/api/sync-user', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    // فقط تأیید کن که درخواست دریافت شده
     res.status(200).json({ 
       success: true,
       botId: SELF_BOT_ID,
@@ -482,6 +551,8 @@ app.post('/api/release-user', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
+    console.log(`✅ درخواست آزادسازی کاربر ${userId} دریافت شد`);
+    
     res.status(200).json({ 
       success: true,
       botId: SELF_BOT_ID,
@@ -495,15 +566,15 @@ app.post('/api/release-user', async (req, res) => {
 // ==================[ راه‌اندازی سرور ]==================
 app.use(bot.webhookCallback('/webhook'));
 app.get('/', (req, res) => {
-  res.send(`🤖 ربات تلگرام ${SELF_BOT_ID} (تریگر) در حال اجراست!`);
+  res.send(`🤖 ربات تلگرام ${SELF_BOT_ID} (تریگر) در حال اجراست!\nمالک: ${OWNER_ID}`);
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 سرور تریگر ${SELF_BOT_ID} راه‌اندازی شد`);
+  console.log(`👤 مالک ربات: ${OWNER_ID}`);
   startAutoPing();
 });
 
-// راه‌اندازی ربات
 if (process.env.RENDER_EXTERNAL_URL) {
   const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
   bot.telegram.setWebhook(webhookUrl)
@@ -514,4 +585,12 @@ if (process.env.RENDER_EXTERNAL_URL) {
     });
 } else {
   bot.launch();
-  }
+}
+
+process.on('unhandledRejection', (error) => {
+  console.error('❌ خطای catch نشده:', error);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('❌ خطای مدیریت نشده:', error);
+});
