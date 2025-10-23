@@ -60,31 +60,54 @@ app.get('/ping', (req, res) => {
 // ==================[ تابع آزادسازی - کاملاً اصلاح شده ]==================
 const releaseUserFromQuarantine = async (userId) => {
   try {
-    if (!QUARANTINE_BOT_URL) {
-      console.log('آدرس ربات قرنطینه تنظیم نشده');
+    if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) {
+      console.log('❌ آدرس ربات قرنطینه یا کلید API تنظیم نشده');
       return false;
     }
 
-    console.log(`آزادسازی کاربر ${userId} از قرنطینه...`);
+    console.log(`🔓 درخواست آزادسازی کاربر ${userId} از قرنطینه...`);
     
-    const apiUrl = QUARANTINE_BOT_URL.startsWith('http') ? 
-      QUARANTINE_BOT_URL : `https://${QUARANTINE_BOT_URL}`;
+    // اصلاح آدرس API - حذف قسمت‌های اضافی
+    let apiUrl = QUARANTINE_BOT_URL;
+    if (!apiUrl.startsWith('http')) {
+      apiUrl = `https://${apiUrl}`;
+    }
     
-    const response = await axios.post(`${apiUrl}/api/release-user`, {
-      userId: userId,
+    // حذف مسیرهای تکراری اگر وجود دارد
+    apiUrl = apiUrl.replace(/\/+$/, '');
+    
+    const apiEndpoint = `${apiUrl}/api/release-user`;
+    console.log(`🌐 ارسال درخواست به: ${apiEndpoint}`);
+
+    const requestData = {
+      userId: parseInt(userId),
       secretKey: API_SECRET_KEY,
       sourceBot: SELF_BOT_ID
-    }, { timeout: 10000 });
+    };
+
+    console.log('📦 داده‌های ارسالی:', requestData);
+
+    const response = await axios.post(apiEndpoint, requestData, { 
+      timeout: 15000,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log('📨 پاسخ دریافت شد:', response.data);
 
     if (response.data && response.data.success) {
       console.log(`✅ کاربر ${userId} با موفقیت آزاد شد`);
       return true;
     } else {
-      console.log(`❌ خطا در آزادسازی کاربر ${userId}`);
+      console.log(`❌ خطا در آزادسازی کاربر ${userId}:`, response.data);
       return false;
     }
   } catch (error) {
     console.log(`❌ خطا در ارتباط با ربات قرنطینه:`, error.message);
+    if (error.response) {
+      console.log('📋 جزئیات خطا:', error.response.data);
+    }
     return false;
   }
 };
@@ -121,7 +144,9 @@ const handleTrigger = async (ctx, triggerType) => {
           triggerData = data;
           cache.set(cacheKey, data, 3600);
         }
-      } catch (error) {}
+      } catch (error) {
+        console.log('خطا در دریافت داده از دیتابیس:', error.message);
+      }
     }
 
     const delay = triggerData?.delay || 5;
@@ -130,10 +155,12 @@ const handleTrigger = async (ctx, triggerType) => {
     
     const initialMessage = `${triggerEmoji}┊${userName} وارد منطقه شد\n\n⏳┊زمان: ${formatTime(delay)}`;
     
-    await ctx.reply(initialMessage, { 
+    const sentMessage = await ctx.reply(initialMessage, { 
       reply_to_message_id: ctx.message.message_id,
       ...createGlassButton()
     });
+
+    console.log(`⏰ تایمر ${delay} ثانیه‌ای برای کاربر ${userId} شروع شد`);
 
     setTimeout(async () => {
       try {
@@ -143,15 +170,21 @@ const handleTrigger = async (ctx, triggerType) => {
           disable_web_page_preview: true
         });
         
-        // آزادسازی کاربر - اینجا مشکل اصلی حل شد
-        console.log(`آزادسازی کاربر ${userId} پس از اتمام تایمر`);
-        await releaseUserFromQuarantine(userId);
+        // آزادسازی کاربر - با لاگ بیشتر برای دیباگ
+        console.log(`🕒 تایمر برای کاربر ${userId} به پایان رسید، شروع آزادسازی...`);
+        const releaseResult = await releaseUserFromQuarantine(userId);
+        
+        if (releaseResult) {
+          console.log(`🎉 کاربر ${userId} با موفقیت از قرنطینه آزاد شد`);
+        } else {
+          console.log(`⚠️ کاربر ${userId} آزاد نشد - ممکن است در قرنطینه نباشد یا خطایی رخ داده`);
+        }
       } catch (error) {
-        console.log('خطا در ارسال پیام تأخیری:', error.message);
+        console.log('❌ خطا در ارسال پیام تأخیری:', error.message);
       }
     }, delay * 1000);
   } catch (error) {
-    console.log('خطا در پردازش تریگر:', error.message);
+    console.log('❌ خطا در پردازش تریگر:', error.message);
   }
 };
 
@@ -358,6 +391,7 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 تریگر ${SELF_BOT_ID} راه‌اندازی شد`);
+  console.log(`🔗 آدرس ربات قرنطینه: ${QUARANTINE_BOT_URL}`);
   startAutoPing();
 });
 
