@@ -57,27 +57,36 @@ app.get('/ping', (req, res) => {
   res.status(200).json({ status: 'active', bot: SELF_BOT_ID });
 });
 
-// ==================[ تابع آزادسازی - کاملاً اصلاح شده ]==================
+// ==================[ تابع آزادسازی - کاملاً بازنویسی شده ]==================
 const releaseUserFromQuarantine = async (userId) => {
   try {
-    if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) {
-      console.log('❌ آدرس ربات قرنطینه یا کلید API تنظیم نشده');
+    console.log(`\n🔓 ========== شروع آزادسازی کاربر ${userId} ==========`);
+    
+    if (!QUARANTINE_BOT_URL) {
+      console.log('❌ QUARANTINE_BOT_URL تنظیم نشده');
+      return false;
+    }
+    
+    if (!API_SECRET_KEY) {
+      console.log('❌ API_SECRET_KEY تنظیم نشده');
       return false;
     }
 
-    console.log(`🔓 درخواست آزادسازی کاربر ${userId} از قرنطینه...`);
+    console.log(`📡 آدرس ربات قرنطینه: ${QUARANTINE_BOT_URL}`);
+    console.log(`👤 کاربر مورد نظر: ${userId}`);
+    console.log(`🔑 کلید API: ${API_SECRET_KEY ? 'تنظیم شده' : 'تنظیم نشده'}`);
     
-    // اصلاح آدرس API - حذف قسمت‌های اضافی
-    let apiUrl = QUARANTINE_BOT_URL;
+    // آماده‌سازی آدرس API
+    let apiUrl = QUARANTINE_BOT_URL.trim();
     if (!apiUrl.startsWith('http')) {
       apiUrl = `https://${apiUrl}`;
     }
     
-    // حذف مسیرهای تکراری اگر وجود دارد
+    // حذف اسلش‌های اضافی
     apiUrl = apiUrl.replace(/\/+$/, '');
-    
     const apiEndpoint = `${apiUrl}/api/release-user`;
-    console.log(`🌐 ارسال درخواست به: ${apiEndpoint}`);
+    
+    console.log(`🌐 endpoint نهایی: ${apiEndpoint}`);
 
     const requestData = {
       userId: parseInt(userId),
@@ -85,42 +94,68 @@ const releaseUserFromQuarantine = async (userId) => {
       sourceBot: SELF_BOT_ID
     };
 
-    console.log('📦 داده‌های ارسالی:', requestData);
+    console.log('📦 داده‌های ارسالی:', JSON.stringify(requestData, null, 2));
 
     const response = await axios.post(apiEndpoint, requestData, { 
-      timeout: 15000,
+      timeout: 20000,
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'User-Agent': 'TriggerBot/1.0'
       }
     });
 
-    console.log('📨 پاسخ دریافت شد:', response.data);
+    console.log('✅ درخواست با موفقیت ارسال شد');
+    console.log('📨 وضعیت پاسخ:', response.status);
+    console.log('📝 پاسخ سرور:', JSON.stringify(response.data, null, 2));
 
     if (response.data && response.data.success) {
-      console.log(`✅ کاربر ${userId} با موفقیت آزاد شد`);
+      console.log(`🎉 کاربر ${userId} با موفقیت آزاد شد`);
       return true;
     } else {
-      console.log(`❌ خطا در آزادسازی کاربر ${userId}:`, response.data);
+      console.log(`⚠️ پاسخ سرور نشان می‌دهد آزادسازی موفق نبوده`);
       return false;
     }
   } catch (error) {
-    console.log(`❌ خطا در ارتباط با ربات قرنطینه:`, error.message);
-    if (error.response) {
-      console.log('📋 جزئیات خطا:', error.response.data);
+    console.log(`❌ خطا در ارتباط با ربات قرنطینه:`);
+    console.log('📋 پیغام خطا:', error.message);
+    
+    if (error.code) {
+      console.log('🏷️ کد خطا:', error.code);
     }
+    
+    if (error.response) {
+      console.log('📊 وضعیت HTTP:', error.response.status);
+      console.log('📝 داده پاسخ خطا:', JSON.stringify(error.response.data, null, 2));
+    } else if (error.request) {
+      console.log('🔌 درخواست ارسال شد اما پاسخی دریافت نشد');
+      console.log('🌐 آدرس درخواست:', error.request._currentUrl || 'نامشخص');
+    }
+    
+    console.log('🔍 جزئیات کامل خطا:', error);
     return false;
   }
 };
 
-// ==================[ تابع handleTrigger - اصلاح شده ]==================
+// ==================[ تابع handleTrigger - کاملاً بازنویسی شده ]==================
 const handleTrigger = async (ctx, triggerType) => {
   try {
-    if (ctx.chat.type === 'private') return;
+    console.log(`\n🎯 ========== شروع تریگر ${triggerType} ==========`);
+    
+    if (ctx.chat.type === 'private') {
+      console.log('❌ پیام در چت خصوصی است - نادیده گرفته می‌شود');
+      return;
+    }
 
     const userName = ctx.from.first_name || 'کاربر';
     const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
+
+    console.log(`👤 کاربر: ${userName} (${userId})`);
+    console.log(`💬 گروه: ${ctx.chat.title} (${chatId})`);
+    console.log(`🏷️ تریگر: ${triggerType}`);
     
     if (triggerType === 'خروج') {
+      console.log('🚪 تریگر خروج فعال شد');
       await ctx.reply(`🧭┊سفر به سلامت ${userName}`, { 
         reply_to_message_id: ctx.message.message_id,
         ...createGlassButton()
@@ -128,25 +163,37 @@ const handleTrigger = async (ctx, triggerType) => {
       return;
     }
     
-    const cacheKey = `trigger_${ctx.chat.id}_${triggerType}`;
+    const cacheKey = `trigger_${chatId}_${triggerType}`;
+    console.log(`🔑 کلید کش: ${cacheKey}`);
+    
     let triggerData = cache.get(cacheKey);
     
     if (!triggerData) {
+      console.log('📡 داده در کش یافت نشد - دریافت از دیتابیس...');
       try {
-        const { data } = await supabase
+        const { data, error } = await supabase
           .from('triggers')
           .select('delay, delayed_message')
-          .eq('chat_id', ctx.chat.id)
+          .eq('chat_id', chatId)
           .eq('trigger_type', triggerType)
           .single();
+
+        if (error) {
+          console.log('❌ خطا در دریافت از دیتابیس:', error.message);
+        }
 
         if (data) {
           triggerData = data;
           cache.set(cacheKey, data, 3600);
+          console.log('✅ داده از دیتابیس دریافت و در کش ذخیره شد');
+        } else {
+          console.log('⚠️ داده‌ای در دیتابیس یافت نشد - استفاده از مقادیر پیش‌فرض');
         }
       } catch (error) {
-        console.log('خطا در دریافت داده از دیتابیس:', error.message);
+        console.log('❌ خطا در دریافت داده از دیتابیس:', error.message);
       }
+    } else {
+      console.log('✅ داده از کش بازیابی شد');
     }
 
     const delay = triggerData?.delay || 5;
@@ -155,36 +202,67 @@ const handleTrigger = async (ctx, triggerType) => {
     
     const initialMessage = `${triggerEmoji}┊${userName} وارد منطقه شد\n\n⏳┊زمان: ${formatTime(delay)}`;
     
+    console.log(`⏰ تایمر تنظیم شده: ${delay} ثانیه`);
+    console.log(`📝 پیام تأخیری: ${delayedMessage}`);
+
     const sentMessage = await ctx.reply(initialMessage, { 
       reply_to_message_id: ctx.message.message_id,
       ...createGlassButton()
     });
 
-    console.log(`⏰ تایمر ${delay} ثانیه‌ای برای کاربر ${userId} شروع شد`);
+    console.log(`✅ پیام اولیه ارسال شد - شروع تایمر ${delay} ثانیه‌ای`);
+
+    // ذخیره اطلاعات تایمر برای استفاده بعدی
+    const timerData = {
+      userId: userId,
+      userName: userName,
+      chatId: chatId,
+      triggerType: triggerType,
+      delayedMessage: delayedMessage,
+      originalMessageId: ctx.message.message_id
+    };
 
     setTimeout(async () => {
       try {
-        await ctx.telegram.sendMessage(ctx.chat.id, delayedMessage, {
+        console.log(`\n⏰ ========== تایمر به پایان رسید برای کاربر ${userId} ==========`);
+        console.log(`👤 آزادسازی کاربر: ${userName} (${userId})`);
+        
+        // اول پیام تأخیری رو ارسال کن
+        console.log('📤 ارسال پیام تأخیری...');
+        await ctx.telegram.sendMessage(chatId, delayedMessage, {
           reply_to_message_id: ctx.message.message_id,
           ...createGlassButton(),
           disable_web_page_preview: true
         });
+        console.log('✅ پیام تأخیری ارسال شد');
         
-        // آزادسازی کاربر - با لاگ بیشتر برای دیباگ
-        console.log(`🕒 تایمر برای کاربر ${userId} به پایان رسید، شروع آزادسازی...`);
+        // حالا کاربر رو آزاد کن
+        console.log('🔓 شروع فرآیند آزادسازی کاربر از قرنطینه...');
         const releaseResult = await releaseUserFromQuarantine(userId);
         
         if (releaseResult) {
           console.log(`🎉 کاربر ${userId} با موفقیت از قرنطینه آزاد شد`);
+          // پیام موفقیت آمیز
+          await ctx.telegram.sendMessage(chatId, `✅ کاربر ${userName} از قرنطینه آزاد شد و می‌تواند به گروه‌های دیگر برود.`, {
+            ...createGlassButton()
+          });
         } else {
-          console.log(`⚠️ کاربر ${userId} آزاد نشد - ممکن است در قرنطینه نباشد یا خطایی رخ داده`);
+          console.log(`⚠️ کاربر ${userId} آزاد نشد`);
+          // پیام خطا
+          await ctx.telegram.sendMessage(chatId, `❌ خطا در آزادسازی کاربر ${userName} از قرنطینه. لطفاً با پشتیبانی تماس بگیرید.`, {
+            ...createGlassButton()
+          });
         }
       } catch (error) {
         console.log('❌ خطا در ارسال پیام تأخیری:', error.message);
       }
     }, delay * 1000);
+
+    console.log(`✅ تریگر ${triggerType} با موفقیت تنظیم شد`);
+
   } catch (error) {
     console.log('❌ خطا در پردازش تریگر:', error.message);
+    console.log('🔍 جزئیات خطا:', error);
   }
 };
 
@@ -208,7 +286,7 @@ bot.action('show_glass', async (ctx) => {
   }
 });
 
-// ==================[ بررسی مالکیت - کاملاً اصلاح شده ]==================
+// ==================[ بررسی مالکیت ]==================
 const checkOwnerAccess = (ctx) => {
   const userId = ctx.from.id;
   if (userId !== OWNER_ID) {
@@ -315,10 +393,24 @@ bot.on('text', async (ctx) => {
   try {
     const text = ctx.message.text;
     
-    if (text.includes('#ورود')) await handleTrigger(ctx, 'ورود');
-    if (text.includes('#ماشین')) await handleTrigger(ctx, 'ماشین');
-    if (text.includes('#موتور')) await handleTrigger(ctx, 'موتور');
-    if (text.includes('#خروج')) await handleTrigger(ctx, 'خروج');
+    console.log(`📨 دریافت پیام: "${text}" از کاربر ${ctx.from.id}`);
+    
+    if (text.includes('#ورود')) {
+      console.log('🎯 تشخیص تریگر #ورود');
+      await handleTrigger(ctx, 'ورود');
+    }
+    if (text.includes('#ماشین')) {
+      console.log('🎯 تشخیص تریگر #ماشین');
+      await handleTrigger(ctx, 'ماشین');
+    }
+    if (text.includes('#موتور')) {
+      console.log('🎯 تشخیص تریگر #موتور');
+      await handleTrigger(ctx, 'موتور');
+    }
+    if (text.includes('#خروج')) {
+      console.log('🎯 تشخیص تریگر #خروج');
+      await handleTrigger(ctx, 'خروج');
+    }
 
     if (!ctx.session.settingTrigger) return;
 
@@ -364,11 +456,31 @@ bot.on('text', async (ctx) => {
       ctx.session.settingTrigger = false;
     }
   } catch (error) {
-    console.log('خطا در پردازش پیام:', error.message);
+    console.log('❌ خطا در پردازش پیام:', error.message);
   }
 });
 
-// ==================[ API ]==================
+// ==================[ API برای تست ]==================
+app.post('/api/test-release', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+    
+    console.log(`🧪 تست دستی آزادسازی کاربر ${userId}`);
+    const result = await releaseUserFromQuarantine(userId);
+    
+    res.status(200).json({ 
+      success: result,
+      message: result ? `User ${userId} released` : `Failed to release user ${userId}`
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/release-user', async (req, res) => {
   try {
     const { userId, secretKey } = req.body;
@@ -386,12 +498,24 @@ app.post('/api/release-user', async (req, res) => {
 // ==================[ راه‌اندازی ]==================
 app.use(bot.webhookCallback('/webhook'));
 app.get('/', (req, res) => {
-  res.send(`🤖 تریگر ${SELF_BOT_ID} فعال - مالک: ${OWNER_ID}`);
+  res.send(`
+    <h1>🤖 تریگر ${SELF_BOT_ID}</h1>
+    <p>ربات فعال است - مالک: ${OWNER_ID}</p>
+    <p>آدرس قرنطینه: ${QUARANTINE_BOT_URL || 'تنظیم نشده'}</p>
+    <p>کلید API: ${API_SECRET_KEY ? 'تنظیم شده' : 'تنظیم نشده'}</p>
+    <h3>تست دستی:</h3>
+    <form action="/api/test-release" method="post">
+      <input type="number" name="userId" placeholder="User ID" required>
+      <button type="submit">تست آزادسازی</button>
+    </form>
+  `);
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 تریگر ${SELF_BOT_ID} راه‌اندازی شد`);
   console.log(`🔗 آدرس ربات قرنطینه: ${QUARANTINE_BOT_URL}`);
+  console.log(`🔑 کلید API: ${API_SECRET_KEY ? 'تنظیم شده' : '❌ تنظیم نشده'}`);
+  console.log(`👤 مالک: ${OWNER_ID}`);
   startAutoPing();
 });
 
@@ -405,5 +529,5 @@ if (process.env.RENDER_EXTERNAL_URL) {
 }
 
 process.on('unhandledRejection', (error) => {
-  console.log('خطای catch نشده:', error.message);
+  console.log('❌ خطای catch نشده:', error.message);
 });
