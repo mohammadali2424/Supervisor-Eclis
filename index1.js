@@ -150,8 +150,8 @@ const checkUserAccess = async (ctx) => {
   }
 };
 
-// ==================[ توابع آزادسازی - بهبود یافته ]==================
-const releaseUserFromQuarantine = async (userId) => {
+// ==================[ توابع آزادسازی - کاملاً بازنویسی شده ]==================
+const releaseUserFromAllQuarantineBots = async (userId) => {
   if (!checkCircuitBreaker()) {
     throw new Error('Circuit Breaker is OPEN');
   }
@@ -159,18 +159,19 @@ const releaseUserFromQuarantine = async (userId) => {
   try {
     if (!SYNC_ENABLED) {
       console.log('⚠️  حالت هماهنگی غیرفعال است');
-      return await releaseUserSingleInstance(userId);
+      return false;
     }
 
     console.log(`🔄 در حال آزاد کردن کاربر ${userId} از تمام ربات‌های قرنطینه...`);
     
     const results = [];
     
-    // فقط با ربات‌های قرنطینه ارتباط برقرار کن
+    // با تمام ربات‌های قرنطینه ارتباط برقرار کن
     const quarantineBots = BOT_INSTANCES.filter(bot => bot.type === 'quarantine');
     
     console.log(`🔍 پیدا شد ${quarantineBots.length} ربات قرنطینه برای ارتباط`);
     
+    // به تمام ربات‌های قرنطینه درخواست آزادسازی بفرست
     for (const botInstance of quarantineBots) {
       try {
         let apiUrl = botInstance.url;
@@ -184,7 +185,7 @@ const releaseUserFromQuarantine = async (userId) => {
           secretKey: botInstance.secretKey || API_SECRET_KEY,
           sourceBot: SELF_BOT_ID
         }, { 
-          timeout: 8000,
+          timeout: 10000,
           headers: {
             'Content-Type': 'application/json'
           }
@@ -204,16 +205,6 @@ const releaseUserFromQuarantine = async (userId) => {
       }
     }
     
-    // همچنین با QUARANTINE_BOT_URL اصلی ارتباط برقرار کن
-    if (QUARANTINE_BOT_URL && API_SECRET_KEY) {
-      try {
-        const currentResult = await releaseUserSingleInstance(userId);
-        results.push({ success: currentResult, botId: 'primary' });
-      } catch (error) {
-        results.push({ success: false, botId: 'primary', error: error.message });
-      }
-    }
-    
     const successCount = results.filter(r => r.success).length;
     const totalAttempts = results.length;
     
@@ -224,46 +215,57 @@ const releaseUserFromQuarantine = async (userId) => {
   } catch (error) {
     recordFailure();
     console.error('❌ خطا در آزادسازی چندرباتی:', error);
-    // در صورت خطا، سعی کن فقط با ربات اصلی ارتباط برقرار کنی
-    return await releaseUserSingleInstance(userId);
+    return false;
   }
 };
 
-const releaseUserSingleInstance = async (userId) => {
+// ==================[ اطلاع به تمام ربات‌های قرنطینه برای هماهنگی ]==================
+const notifyAllQuarantineBots = async (userId, action) => {
   try {
-    if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) {
-      console.error('❌ متغیرهای ارتباطی تنظیم نشده‌اند');
-      return false;
+    if (!SYNC_ENABLED) {
+      console.log('🔕 حالت هماهنگی غیرفعال است');
+      return;
     }
 
-    let apiUrl = QUARANTINE_BOT_URL;
-    if (!apiUrl.startsWith('http')) apiUrl = `https://${apiUrl}`;
-    apiUrl = apiUrl.replace(/\/$/, '');
+    console.log(`📢 اطلاع ${action} کاربر ${userId} به تمام ربات‌های قرنطینه...`);
     
-    console.log(`🔗 ارسال درخواست آزادسازی به ربات قرنطینه اصلی...`);
+    const quarantineBots = BOT_INSTANCES.filter(bot => bot.type === 'quarantine');
     
-    const response = await axios.post(`${apiUrl}/api/release-user`, {
-      userId: userId,
-      secretKey: API_SECRET_KEY,
-      sourceBot: SELF_BOT_ID
-    }, { 
-      timeout: 10000,
-      headers: {
-        'Content-Type': 'application/json'
+    const promises = quarantineBots.map(async (botInstance) => {
+      try {
+        let apiUrl = botInstance.url;
+        if (!apiUrl.startsWith('http')) apiUrl = `https://${apiUrl}`;
+        apiUrl = apiUrl.replace(/\/$/, '');
+        
+        console.log(`🔗 ارسال درخواست ${action} به ${botInstance.id}...`);
+        
+        const response = await axios.post(`${apiUrl}/api/sync-user`, {
+          userId: userId,
+          chatId: null,
+          action: action,
+          secretKey: botInstance.secretKey || API_SECRET_KEY,
+          sourceBot: SELF_BOT_ID
+        }, { 
+          timeout: 10000,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        console.log(`✅ اطلاع‌رسانی به ${botInstance.id} موفق:`, response.data);
+        return { success: true, botId: botInstance.id };
+      } catch (error) {
+        console.error(`❌ خطا در اطلاع‌رسانی به ${botInstance.id}:`, error.message);
+        return { success: false, botId: botInstance.id, error: error.message };
       }
     });
 
-    console.log(`✅ آزادسازی در ربات اصلی موفق:`, response.data);
-    return response.data.success;
+    const results = await Promise.all(promises);
+    const successCount = results.filter(r => r.success).length;
+    
+    console.log(`✅ اطلاع ${action} کاربر ${userId} به ${successCount}/${quarantineBots.length} ربات قرنطینه ارسال شد`);
   } catch (error) {
-    if (error.response) {
-      console.error('❌ خطا در آزاد کردن کاربر از قرنطینه اصلی:', error.response.status, error.response.data);
-    } else if (error.request) {
-      console.error('❌ خطا در آزاد کردن کاربر از قرنطینه اصلی: درخواست ارسال شد اما پاسخی دریافت نشد');
-    } else {
-      console.error('❌ خطا در آزاد کردن کاربر از قرنطینه اصلی:', error.message);
-    }
-    return false;
+    console.error('❌ خطا در اطلاع‌رسانی به ربات‌های قرنطینه:', error);
   }
 };
 
@@ -377,7 +379,7 @@ bot.action('show_glass_message', async (ctx) => {
   }
 });
 
-// ==================[ تابع handleTrigger ]==================
+// ==================[ تابع handleTrigger - کاملاً بازنویسی شده ]==================
 const handleTrigger = async (ctx, triggerType) => {
   if (!checkCircuitBreaker()) {
     try {
@@ -465,11 +467,16 @@ const handleTrigger = async (ctx, triggerType) => {
         
         await ctx.telegram.sendMessage(ctx.chat.id, delayedMessage, messageOptions);
         
-        console.log(`🔄 در حال آزاد کردن کاربر ${ctx.from.id} از قرنطینه...`);
-        const releaseSuccess = await releaseUserFromQuarantine(ctx.from.id);
+        console.log(`🔄 در حال آزاد کردن کاربر ${ctx.from.id} از تمام ربات‌های قرنطینه...`);
+        
+        // 🔥 تغییر اصلی: آزادسازی از تمام ربات‌های قرنطینه
+        const releaseSuccess = await releaseUserFromAllQuarantineBots(ctx.from.id);
         
         if (releaseSuccess) {
-          console.log(`✅ کاربر ${ctx.from.id} با موفقیت از قرنطینه خارج شد`);
+          console.log(`✅ کاربر ${ctx.from.id} با موفقیت از تمام ربات‌های قرنطینه خارج شد`);
+          
+          // اطلاع به تمام ربات‌های قرنطینه برای هماهنگی
+          await notifyAllQuarantineBots(ctx.from.id, 'release');
         } else {
           console.log(`⚠️ آزاد کردن کاربر ${ctx.from.id} از قرنطینه با مشکلاتی مواجه شد`);
         }
@@ -700,28 +707,6 @@ app.get('/api/bot-status', (req, res) => {
     quarantineBots: BOT_INSTANCES.filter(bot => bot.type === 'quarantine').length,
     triggerBots: BOT_INSTANCES.filter(bot => bot.type === 'trigger').length
   });
-});
-
-app.post('/api/sync-release', async (req, res) => {
-  try {
-    const { userId, secretKey, sourceBot } = req.body;
-    
-    if (!secretKey || secretKey !== API_SECRET_KEY) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    
-    console.log(`🔄 درخواست هماهنگی از ${sourceBot} برای کاربر ${userId}`);
-    
-    res.status(200).json({
-      success: true,
-      botId: SELF_BOT_ID,
-      processed: true,
-      message: `درخواست هماهنگی از ${sourceBot} پردازش شد`
-    });
-  } catch (error) {
-    console.error('❌ خطا در پردازش هماهنگی:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
 });
 
 // ==================[ راه‌اندازی سرور ]==================
