@@ -223,23 +223,22 @@ const handleTrigger = async (ctx, triggerType) => {
     const messageId = ctx.message.message_id;
 
     setTimeout(async () => {
-      try {
-        const formattedMessage = createFormattedMessage(delayedMessage, messageEntities);
-        
-        const messageOptions = {
-          reply_to_message_id: messageId,
-          ...createGlassButton(),
-          ...formattedMessage
-        };
+  try {
+    const formattedMessage = createFormattedMessage(delayedMessage, messageEntities);
+    
+    const messageOptions = {
+      reply_to_message_id: messageId,
+      ...createGlassButton(),
+      ...formattedMessage,
+      disable_web_page_preview: true // ✅ برای اطمینان بیشتر
+    };
 
-        await bot.telegram.sendMessage(chatId, formattedMessage.text, messageOptions);
-        
-        console.log(`🕒 تایمر برای کاربر ${userId} به پایان رسید، شروع آزادسازی...`);
-        await releaseUserFromQuarantine(userId);
-      } catch (error) {
-        console.log('❌ خطا در ارسال پیام تأخیری:', error.message);
-      }
-    }, delay * 1000);
+    await bot.telegram.sendMessage(chatId, formattedMessage.text, messageOptions);
+    // ...
+  } catch (error) {
+    console.log('❌ خطا در ارسال پیام تأخیری:', error.message);
+  }
+}, delay * 1000);
   } catch (error) {
     console.log('❌ خطا در پردازش تریگر:', error.message);
   }
@@ -253,7 +252,7 @@ const formatTime = (seconds) => {
 
 const createGlassButton = () => {
   return Markup.inlineKeyboard([
-    Markup.button.callback('𝐄𝐜𝐥𝐢���� 𝐖𝐨𝐫𝐥𝐝', 'show_glass')
+    Markup.button.callback('𝐄𝐜𝐥𝐢𝐬 𝐖𝐨𝐫𝐥𝐝', 'show_glass')
   ]);
 };
 
