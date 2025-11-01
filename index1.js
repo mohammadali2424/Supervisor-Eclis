@@ -16,8 +16,7 @@ const SELF_BOT_ID = process.env.SELF_BOT_ID || 'trigger_1';
 const cache = new NodeCache({ 
   stdTTL: 3600,
   checkperiod: 1200,
-  maxKeys: 2000,
-  useClones: false
+  maxKeys: 2000
 });
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -26,15 +25,14 @@ const app = express();
 
 app.use(express.json());
 
-// ==================[ سشن بهبود یافته ]==================
+// ==================[ سشن ]==================
 bot.use(session({
   defaultSession: () => ({
     settingTrigger: false,
     triggerType: null,
     step: null,
     delay: null,
-    chatId: null,
-    userId: null
+    chatId: null
   })
 }));
 
@@ -47,9 +45,7 @@ const startAutoPing = () => {
   const performPing = async () => {
     try {
       await axios.head(`${selfUrl}/ping`, { timeout: 5000 });
-      console.log('✅ پینگ موفق - تریگر');
     } catch (error) {
-      console.log('❌ خطا در پینگ تریگر:', error.message);
       setTimeout(performPing, 60000);
     }
   };
@@ -60,10 +56,10 @@ const startAutoPing = () => {
 
 app.head('/ping', (req, res) => res.status(200).end());
 app.get('/ping', (req, res) => {
-  res.status(200).json({ status: 'active', bot: SELF_BOT_ID, timestamp: new Date().toISOString() });
+  res.status(200).json({ status: 'active', bot: SELF_BOT_ID });
 });
 
-// ==================[ تابع آزادسازی بهبود یافته ]==================
+// ==================[ تابع آزادسازی ]==================
 const releaseUserFromQuarantine = async (userId) => {
   try {
     if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) {
@@ -95,8 +91,7 @@ const releaseUserFromQuarantine = async (userId) => {
         const response = await axios.post(apiEndpoint, requestData, { 
           timeout: 10000,
           headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': `TriggerBot/${SELF_BOT_ID}`
+            'Content-Type': 'application/json'
           }
         });
 
@@ -125,7 +120,7 @@ const releaseUserFromQuarantine = async (userId) => {
 
 // ==================[ تابع ایجاد فرمت پیام ]==================
 const createFormattedMessage = (text, entities = []) => {
-  if (!text || !entities || entities.length === 0) {
+  if (!entities || entities.length === 0) {
     return { 
       text: text || 'پیام خالی',
       parse_mode: undefined,
@@ -133,7 +128,7 @@ const createFormattedMessage = (text, entities = []) => {
     };
   }
 
-  let formattedText = text;
+  let formattedText = text || '';
   const sortedEntities = [...entities].sort((a, b) => b.offset - a.offset);
   
   sortedEntities.forEach(entity => {
@@ -141,9 +136,7 @@ const createFormattedMessage = (text, entities = []) => {
     const start = offset;
     const end = offset + length;
     
-    if (start >= formattedText.length || end > formattedText.length) {
-      return;
-    }
+    if (start >= formattedText.length || end > formattedText.length) return;
     
     const entityText = formattedText.substring(start, end);
     let wrappedText = entityText;
@@ -187,13 +180,10 @@ const createFormattedMessage = (text, entities = []) => {
   };
 };
 
-// ==================[ تابع handleTrigger بهبود یافته ]==================
+// ==================[ تابع handleTrigger ]==================
 const handleTrigger = async (ctx, triggerType) => {
   try {
-    if (ctx.chat.type === 'private') {
-      await ctx.reply('❌ این دستور فقط در گروه قابل استفاده است');
-      return;
-    }
+    if (ctx.chat.type === 'private') return;
 
     const userName = ctx.from.first_name || 'کاربر';
     const userId = ctx.from.id;
@@ -205,13 +195,7 @@ const handleTrigger = async (ctx, triggerType) => {
       });
       
       console.log(`🔓 درخواست آزادسازی فوری کاربر ${userId}...`);
-      const releaseResult = await releaseUserFromQuarantine(userId);
-      
-      if (releaseResult) {
-        console.log(`✅ کاربر ${userId} با موفقیت آزاد شد`);
-      } else {
-        console.log(`❌ آزادسازی کاربر ${userId} ناموفق بود`);
-      }
+      await releaseUserFromQuarantine(userId);
       return;
     }
     
@@ -227,16 +211,12 @@ const handleTrigger = async (ctx, triggerType) => {
           .eq('trigger_type', triggerType)
           .single();
 
-        if (error) {
-          console.log(`❌ خطا در دریافت تریگر ${triggerType}:`, error.message);
-        }
-
-        if (data) {
+        if (!error && data) {
           triggerData = data;
           cache.set(cacheKey, data, 3600);
         }
       } catch (error) {
-        console.log('❌ خطا در دریافت داده از دیتابیس:', error.message);
+        console.log('خطا در دریافت داده از دیتابیس:', error.message);
       }
     }
 
@@ -284,11 +264,6 @@ const handleTrigger = async (ctx, triggerType) => {
 
   } catch (error) {
     console.log('❌ خطا در پردازش تریگر:', error.message);
-    try {
-      await ctx.reply('❌ خطا در پردازش درخواست');
-    } catch (e) {
-      console.log('❌ خطا در ارسال پیام خطا:', e.message);
-    }
   }
 };
 
@@ -314,8 +289,8 @@ bot.action('show_glass', async (ctx) => {
 
 // ==================[ بررسی مالکیت ]==================
 const checkOwnerAccess = (ctx) => {
-  const userId = ctx.from?.id;
-  if (!userId || userId !== OWNER_ID) {
+  const userId = ctx.from.id;
+  if (userId !== OWNER_ID) {
     return {
       hasAccess: false,
       message: '🚫 شما مالک اکلیس نیستی ، حق استفاده از بات این مجموعه رو نداری ، حدتو بدون'
@@ -325,31 +300,27 @@ const checkOwnerAccess = (ctx) => {
 };
 
 // ==================[ دستورات ]==================
-bot.command('help', async (ctx) => {
-  try {
-    await ctx.reply(`🤖 راهنما:
+bot.command('help', (ctx) => {
+  ctx.reply(`🤖 راهنما:
 /status - وضعیت
 /set_t1 - تنظیم #ورود
 /set_t2 - تنظیم #ماشین  
 /set_t3 - تنظیم #موتور
 /off - غیرفعال کردن
 #ورود #ماشین #موتور #خروج`);
-  } catch (error) {
-    console.log('❌ خطا در دستور help:', error.message);
-  }
 });
 
 bot.command('status', async (ctx) => {
   try {
     const access = checkOwnerAccess(ctx);
     if (!access.hasAccess) {
-      return await ctx.reply(access.message);
+      return ctx.reply(access.message);
     }
 
     let triggerInfo = '\n⚙️ تریگرها:';
     const { data: triggers, error } = await supabase
       .from('triggers')
-      .select('trigger_type, delay, delayed_message')
+      .select('trigger_type, delay')
       .eq('chat_id', ctx.chat.id);
 
     if (!error && triggers && triggers.length > 0) {
@@ -362,10 +333,9 @@ bot.command('status', async (ctx) => {
       triggerInfo += '\n❌ تریگری تنظیم نشده';
     }
 
-    await ctx.reply(`🤖 وضعیت:${triggerInfo}`);
+    ctx.reply(`🤖 وضعیت:${triggerInfo}`);
   } catch (error) {
-    console.log('❌ خطا در دستور status:', error.message);
-    await ctx.reply('❌ خطا در دریافت وضعیت');
+    ctx.reply('❌ خطا در دریافت وضعیت');
   }
 });
 
@@ -373,7 +343,7 @@ bot.command('off', async (ctx) => {
   try {
     const access = checkOwnerAccess(ctx);
     if (!access.hasAccess) {
-      return await ctx.reply(access.message);
+      return ctx.reply(access.message);
     }
 
     const chatId = ctx.chat.id;
@@ -383,20 +353,16 @@ bot.command('off', async (ctx) => {
       ['ورود', 'ماشین', 'موتور'].forEach(type => {
         cache.del(`trigger_${chatId}_${type}`);
       });
-      await ctx.reply('✅ ربات غیرفعال شد');
+      ctx.reply('✅ ربات غیرفعال شد');
     } else {
-      await ctx.reply('❌ خطا در غیرفعال کردن');
+      ctx.reply('❌ خطا در غیرفعال کردن');
     }
     
     try {
       await ctx.leaveChat();
-      console.log(`🚪 ربات تریگر از گروه ${chatId} خارج شد`);
-    } catch (error) {
-      console.log('⚠️ خطا در خروج از گروه:', error.message);
-    }
+    } catch (error) {}
   } catch (error) {
-    console.log('❌ خطا در دستور off:', error.message);
-    await ctx.reply('❌ خطا در غیرفعال کردن');
+    ctx.reply('❌ خطا در غیرفعال کردن');
   }
 });
 
@@ -404,20 +370,18 @@ const setupTrigger = async (ctx, triggerType) => {
   try {
     const access = checkOwnerAccess(ctx);
     if (!access.hasAccess) {
-      return await ctx.reply(access.message);
+      return ctx.reply(access.message);
     }
 
     ctx.session.settingTrigger = true;
     ctx.session.triggerType = triggerType;
     ctx.session.step = 'delay';
     ctx.session.chatId = ctx.chat.id;
-    ctx.session.userId = ctx.from.id;
 
     const emoji = triggerType === 'ورود' ? '🚪' : triggerType === 'ماشین' ? '🚗' : '🏍️';
-    await ctx.reply(`${emoji} تریگر #${triggerType}\n⏰ زمان به ثانیه (۱-۳۶۰۰):`);
+    await ctx.reply(`${emoji} تریگر #${triggerType}\n⏰ زمان به ثانیه:`);
   } catch (error) {
-    console.log('❌ خطا در شروع تنظیم تریگر:', error.message);
-    await ctx.reply('❌ خطا در شروع تنظیم تریگر');
+    ctx.reply('❌ خطا در شروع تنظیم تریگر');
   }
 };
 
@@ -439,13 +403,7 @@ bot.on('text', async (ctx) => {
 
     const access = checkOwnerAccess(ctx);
     if (!access.hasAccess) {
-      await ctx.reply(access.message);
-      ctx.session.settingTrigger = false;
-      return;
-    }
-
-    if (ctx.session.userId !== ctx.from.id) {
-      await ctx.reply('❌ جلسه تنظیم منقضی شده است. مجدداً دستور را ارسال کنید.');
+      ctx.reply(access.message);
       ctx.session.settingTrigger = false;
       return;
     }
@@ -453,13 +411,13 @@ bot.on('text', async (ctx) => {
     if (ctx.session.step === 'delay') {
       const delay = parseInt(ctx.message.text);
       if (isNaN(delay) || delay <= 0 || delay > 3600) {
-        await ctx.reply('❌ لطفاً عدد بین ۱ تا ۳۶۰۰ ثانیه وارد کنید:');
+        ctx.reply('❌ عدد 1 تا 3600');
         return;
       }
 
       ctx.session.delay = delay;
       ctx.session.step = 'message';
-      await ctx.reply(`✅ زمان: ${formatTime(delay)}\n📝 پیام نهایی:`);
+      await ctx.reply(`✅ زمان: ${formatTime(delay)}\n📝 پیام:`);
     } else if (ctx.session.step === 'message') {
       try {
         const text = ctx.message.text;
@@ -482,22 +440,18 @@ bot.on('text', async (ctx) => {
           cache.del(`trigger_${ctx.session.chatId}_${ctx.session.triggerType}`);
           const emoji = ctx.session.triggerType === 'ورود' ? '🚪' : 
                        ctx.session.triggerType === 'ماشین' ? '🚗' : '🏍️';
-          await ctx.reply(`${emoji} تریگر #${ctx.session.triggerType} تنظیم شد!\n⏰ زمان: ${formatTime(ctx.session.delay)}`);
+          ctx.reply(`${emoji} تریگر #${ctx.session.triggerType} تنظیم شد!`);
         } else {
-          console.log('❌ خطا در ذخیره تریگر:', error);
-          await ctx.reply('❌ خطا در ذخیره تریگر');
+          ctx.reply('❌ خطا در ذخیره تریگر');
         }
       } catch (error) {
-        console.log('❌ خطا در ذخیره تریگر:', error);
-        await ctx.reply('❌ خطا در ذخیره تریگر');
+        console.log('خطا در ذخیره:', error);
+        ctx.reply('❌ خطا در ذخیره');
       }
       ctx.session.settingTrigger = false;
-      ctx.session.triggerType = null;
-      ctx.session.step = null;
-      ctx.session.delay = null;
     }
   } catch (error) {
-    console.log('❌ خطا در پردازش پیام:', error.message);
+    console.log('خطا در پردازش پیام:', error.message);
   }
 });
 
@@ -507,67 +461,35 @@ app.post('/api/release-user', async (req, res) => {
     const { userId, secretKey } = req.body;
     
     if (!secretKey || secretKey !== API_SECRET_KEY) {
-      console.log('❌ کلید API نامعتبر در تریگر');
       return res.status(401).json({ error: 'unauthorized' });
     }
     
-    res.status(200).json({ 
-      success: true, 
-      botId: SELF_BOT_ID,
-      message: 'دریافت شد'
-    });
+    res.status(200).json({ success: true, botId: SELF_BOT_ID });
   } catch (error) {
-    console.log('❌ خطا در API تریگر:', error.message);
-    res.status(500).json({ error: 'internal server error' });
+    res.status(500).json({ error: 'error' });
   }
 });
 
 // ==================[ راه‌اندازی ]==================
 app.use(bot.webhookCallback('/webhook'));
-
 app.get('/', (req, res) => {
-  res.send(`
-    <h1>🤖 ربات تریگر ${SELF_BOT_ID}</h1>
-    <p>ربات فعال است - مالک: ${OWNER_ID}</p>
-    <p>ربات قرنطینه: ${QUARANTINE_BOT_URL ? 'متصل' : 'قطع'}</p>
-    <p>زمان: ${new Date().toLocaleString('fa-IR')}</p>
-  `);
+  res.send(`🤖 تریگر ${SELF_BOT_ID} فعال - مالک: ${OWNER_ID}`);
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 ربات تریگر ${SELF_BOT_ID} راه‌اندازی شد`);
-  console.log(`👤 مالک ربات: ${OWNER_ID}`);
-  console.log(`🔗 ربات قرنطینه: ${QUARANTINE_BOT_URL ? 'تنظیم شده' : 'تنظیم نشده'}`);
-  console.log(`🌐 پورت: ${PORT}`);
+  console.log(`🚀 تریگر ${SELF_BOT_ID} راه‌اندازی شد`);
   startAutoPing();
 });
 
 if (process.env.RENDER_EXTERNAL_URL) {
   const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
   bot.telegram.setWebhook(webhookUrl)
-    .then(() => console.log('✅ Webhook تریگر تنظیم شد: ' + webhookUrl))
-    .catch(error => {
-      console.log('❌ خطا در تنظیم Webhook تریگر:', error.message);
-      console.log('🔄 راه‌اندازی تریگر با polling...');
-      bot.launch();
-    });
+    .then(() => console.log('✅ Webhook تنظیم شد'))
+    .catch(() => bot.launch());
 } else {
-  console.log('🔄 راه‌اندازی تریگر با polling...');
   bot.launch();
 }
 
 process.on('unhandledRejection', (error) => {
-  console.log('❌ خطای catch نشده در تریگر:', error.message);
-});
-
-process.on('SIGINT', () => {
-  console.log('🛑 دریافت SIGINT - خروج تریگر...');
-  bot.stop();
-  process.exit();
-});
-
-process.on('SIGTERM', () => {
-  console.log('🛑 دریافت SIGTERM - خروج تریگر...');
-  bot.stop();
-  process.exit();
+  console.log('خطای catch نشده:', error.message);
 });
