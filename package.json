@@ -1,6 +1,7 @@
 {
   "name": "telegram-trigger-bot",
   "version": "3.3.0",
+  "@supabase/supabase-js": "^2.39.7",
   "description": "Telegram trigger bot to handle user movement between groups and manage quarantine",
   "main": "index1.js",
   "scripts": {
@@ -25,3 +26,4 @@
   "author": "",
   "license": "MIT"
 }
+
