@@ -12,6 +12,8 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const PORT = process.env.PORT || 3000;
 const OWNER_ID = parseInt(process.env.OWNER_ID || '0', 10);
 const SELF_BOT_ID = process.env.SELF_BOT_ID || 'trigger_1';
+const QUARANTINE_BOT_URL = process.env.QUARANTINE_BOT_URL || ''; // مثلا https://your-quarantine-service.onrender.com
+const API_SECRET_KEY = process.env.API_SECRET_KEY || '';
 
 if (!BOT_TOKEN) { console.error('❌ BOT_TOKEN تنظیم نشده'); process.exit(1); }
 if (!SUPABASE_URL || !SUPABASE_KEY) { console.error('❌ SUPABASE_URL/SUPABASE_KEY تنظیم نشده'); process.exit(1); }
@@ -45,11 +47,8 @@ const isOwner = (ctx) => (ctx.from?.id === OWNER_ID);
 const replyNotOwner = async (ctx) => {
   try { await ctx.reply('به غیر از ارباب کسی نمیتونه به ما دستور بده', { reply_to_message_id: ctx.message?.message_id }); } catch {}
 };
-const checkOwnerOrReply = (ctx) => {
-  if (isOwner(ctx)) return true;
-  replyNotOwner(ctx);
-  return false;
-};
+const ensureOwner = (ctx) => { if (isOwner(ctx)) return true; replyNotOwner(ctx); return false; };
+
 const formatTime = (s) => (s < 60 ? `${s} ثانیه` : `${Math.floor(s/60)} دقیقه`);
 const createGlassButton = () => Markup.inlineKeyboard([Markup.button.callback('Eclis World', 'show_glass')]);
 const createFormattedMessage = (text, entities = []) => {
@@ -134,7 +133,7 @@ bot.command('help', (ctx) => {
 });
 
 bot.command('status', async (ctx) => {
-  if (!checkOwnerOrReply(ctx)) return;
+  if (!ensureOwner(ctx)) return;
   let info = '\n⚙️ تریگرها:';
   const { data, error } = await supabase.from('triggers').select('trigger_type, delay').eq('chat_id', `${ctx.chat.id}`);
   if (!error && data?.length) {
@@ -147,7 +146,7 @@ bot.command('status', async (ctx) => {
 });
 
 const setupTrigger = async (ctx, triggerType) => {
-  if (!checkOwnerOrReply(ctx)) return;
+  if (!ensureOwner(ctx)) return;
   ctx.session.settingTrigger = true;
   ctx.session.triggerType = triggerType;
   ctx.session.step = 'delay';
@@ -160,22 +159,38 @@ bot.command('set_t2', (ctx) => setupTrigger(ctx, 'ماشین'));
 bot.command('set_t3', (ctx) => setupTrigger(ctx, 'موتور'));
 
 bot.command('off', async (ctx) => {
-  if (!checkOwnerOrReply(ctx)) return;
+  if (!ensureOwner(ctx)) return;
   const chatId = `${ctx.chat.id}`;
   const { error } = await supabase.from('triggers').delete().eq('chat_id', chatId);
-  if (error) {
-    await ctx.reply('⚠️ تریگرها پاک نشد، تلاش برای ترک گروه...');
-  } else {
+  if (error) { await ctx.reply('⚠️ تریگرها پاک نشد، تلاش برای ترک گروه...'); }
+  else {
     ['ورود','ماشین','موتور','خروج'].forEach(t => cache.del(`trigger_${chatId}_${t}`));
     await ctx.reply('✅ تریگرها پاک شد. ربات گروه را ترک می‌کند...');
   }
   try { await ctx.leaveChat(); } catch {}
 });
 
-// ---------- Trigger runtime ----------
+// ---------- Trigger runtime + اتصال به ربات قرنطینه ----------
+const releaseUserFromQuarantine = async (userId) => {
+  if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) return true; // اختیاری
+  let apiUrl = QUARANTINE_BOT_URL.startsWith('http') ? QUARANTINE_BOT_URL : `https://${QUARANTINE_BOT_URL}`;
+  apiUrl = apiUrl.replace(/\/+$/, '');
+  const apiEndpoint = `${apiUrl}/api/release-user`;
+
+  const body = { userId: parseInt(userId, 10), secretKey: API_SECRET_KEY, sourceBot: SELF_BOT_ID };
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const resp = await axios.post(apiEndpoint, body, { timeout: 10000, headers: { 'Content-Type': 'application/json' }});
+      if (resp.data?.success) return true;
+    } catch { /* retry */ }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  return false;
+};
+
 const handleTrigger = async (ctx, triggerType) => {
   try {
-    if (ctx.chat.type === 'private') return; // فقط گروه
+    if (ctx.chat.type === 'private') return;
     const userName = ctx.from.first_name || 'کاربر';
     const userId = ctx.from.id;
 
@@ -193,7 +208,8 @@ const handleTrigger = async (ctx, triggerType) => {
       try {
         const formatted = createFormattedMessage(delayedMessage, messageEntities);
         await bot.telegram.sendMessage(chatId, formatted.text, { reply_to_message_id: messageId, ...createGlassButton(), ...formatted });
-      } catch (e) { console.log('❌ ارسال پیام تاخیری:', e.message); }
+        await releaseUserFromQuarantine(userId); // اتصال به ربات قرنطینه برای آزادسازی
+      } catch (e) { console.log('❌ ارسال پیام تاخیری/آزادسازی:', e.message); }
     }, delay * 1000);
   } catch (e) { console.log('❌ پردازش تریگر:', e.message); }
 };
@@ -203,13 +219,11 @@ bot.on('text', async (ctx) => {
   try {
     const text = ctx.message.text || '';
 
-    // تریگرهای هشتگ
     if (text.includes('#ورود')) await handleTrigger(ctx, 'ورود');
     if (text.includes('#ماشین')) await handleTrigger(ctx, 'ماشین');
     if (text.includes('#موتور')) await handleTrigger(ctx, 'موتور');
     if (text.includes('#خروج')) await handleTrigger(ctx, 'خروج');
 
-    // Wizard تنظیم تریگر
     if (!ctx.session.settingTrigger) return;
     if (!isOwner(ctx)) { await replyNotOwner(ctx); ctx.session.settingTrigger = false; return; }
 
