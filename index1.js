@@ -8,18 +8,18 @@ const NodeCache = require('node-cache');
 // ---------- Env ----------
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 const PORT = process.env.PORT || 3000;
 const OWNER_ID = parseInt(process.env.OWNER_ID || '0', 10);
 const SELF_BOT_ID = process.env.SELF_BOT_ID || 'trigger_1';
-const QUARANTINE_BOT_URL = process.env.QUARANTINE_BOT_URL || ''; // مثلا https://your-quarantine-service.onrender.com
+const QUARANTINE_BOT_URL = process.env.QUARANTINE_BOT_URL || '';
 const API_SECRET_KEY = process.env.API_SECRET_KEY || '';
 
 if (!BOT_TOKEN) { console.error('❌ BOT_TOKEN تنظیم نشده'); process.exit(1); }
 if (!SUPABASE_URL || !SUPABASE_KEY) { console.error('❌ SUPABASE_URL/SUPABASE_KEY تنظیم نشده'); process.exit(1); }
 
 // ---------- Infra ----------
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 app.use(express.json());
@@ -128,7 +128,7 @@ bot.command('help', (ctx) => {
 /set_t2 - تنظیم #ماشین
 /set_t3 - تنظیم #موتور
 /off - غیرفعال کردن و ترک گروه
-#ورود #ماشین #موتور #خروج`
+#ورود #ماشین #موتور #خروج (فقط پیام)`
   );
 });
 
@@ -170,14 +170,14 @@ bot.command('off', async (ctx) => {
   try { await ctx.leaveChat(); } catch {}
 });
 
-// ---------- Trigger runtime + اتصال به ربات قرنطینه ----------
+// ---------- Trigger runtime ----------
 const releaseUserFromQuarantine = async (userId) => {
-  if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) return true; // اختیاری
+  if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) return true;
   let apiUrl = QUARANTINE_BOT_URL.startsWith('http') ? QUARANTINE_BOT_URL : `https://${QUARANTINE_BOT_URL}`;
   apiUrl = apiUrl.replace(/\/+$/, '');
   const apiEndpoint = `${apiUrl}/api/release-user`;
-
   const body = { userId: parseInt(userId, 10), secretKey: API_SECRET_KEY, sourceBot: SELF_BOT_ID };
+
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const resp = await axios.post(apiEndpoint, body, { timeout: 10000, headers: { 'Content-Type': 'application/json' }});
@@ -199,7 +199,7 @@ const handleTrigger = async (ctx, triggerType) => {
     const delayedMessage = row?.delayed_message ?? 'عملیات تکمیل شد! ✅';
     const messageEntities = row?.message_entities ?? [];
 
-    const emoji = triggerType === 'ورود' ? '🎴' : (triggerType === 'ماشین' ? '🚗' : (triggerType === 'خروج' ? '🧭' : '🏍️'));
+    const emoji = triggerType === 'ورود' ? '🎴' : (triggerType === 'ماشین' ? '🚗' : '🏍️');
     const initial = `${emoji}┊${userName} وارد منطقه شد\n\n⏳┊زمان: ${formatTime(delay)}`;
     await ctx.reply(initial, { reply_to_message_id: ctx.message.message_id, ...createGlassButton() });
 
@@ -208,10 +208,24 @@ const handleTrigger = async (ctx, triggerType) => {
       try {
         const formatted = createFormattedMessage(delayedMessage, messageEntities);
         await bot.telegram.sendMessage(chatId, formatted.text, { reply_to_message_id: messageId, ...createGlassButton(), ...formatted });
-        await releaseUserFromQuarantine(userId); // اتصال به ربات قرنطینه برای آزادسازی
+        await releaseUserFromQuarantine(userId);
       } catch (e) { console.log('❌ ارسال پیام تاخیری/آزادسازی:', e.message); }
     }, delay * 1000);
   } catch (e) { console.log('❌ پردازش تریگر:', e.message); }
+};
+
+// NEW: پیام خروج فوری (بدون تریگر و بدون تاخیر)
+const handleFarewell = async (ctx) => {
+  try {
+    if (ctx.chat.type === 'private') return;
+    const user = ctx.from;
+    const displayName = user.first_name || user.username || 'کاربر';
+    const mention = `<a href="tg://user?id=${user.id}">${displayName}</a>`;
+    const text = `🧭┊سفر به سلامت ${mention}`;
+    await ctx.reply(text, { reply_to_message_id: ctx.message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
+  } catch (e) {
+    console.log('❌ پیام خروج:', e.message);
+  }
 };
 
 // ---------- Text pipeline ----------
@@ -219,11 +233,18 @@ bot.on('text', async (ctx) => {
   try {
     const text = ctx.message.text || '';
 
+    // #خروج فقط پیام فوری
+    if (text.includes('#خروج')) {
+      await handleFarewell(ctx);
+      return; // دیگه ادامه ندیم
+    }
+
+    // تریگرهای تاخیری
     if (text.includes('#ورود')) await handleTrigger(ctx, 'ورود');
     if (text.includes('#ماشین')) await handleTrigger(ctx, 'ماشین');
     if (text.includes('#موتور')) await handleTrigger(ctx, 'موتور');
-    if (text.includes('#خروج')) await handleTrigger(ctx, 'خروج');
 
+    // Wizard تنظیم تریگر
     if (!ctx.session.settingTrigger) return;
     if (!isOwner(ctx)) { await replyNotOwner(ctx); ctx.session.settingTrigger = false; return; }
 
