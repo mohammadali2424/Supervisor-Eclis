@@ -1,158 +1,286 @@
-// index1.js — Trigger Bot (hardened)
-require('dotenv').config();
-
-const { Telegraf } = require('telegraf');
+const { Telegraf, session, Markup } = require('telegraf');
+const { createClient } = require('@supabase/supabase-js');
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
-const helmet = require('helmet');
-const cors = require('cors');
-const { URL } = require('url');
 
-// ---------- Env ----------
-const {
-  BOT_TOKEN,
-  QUARANTINE_BOT_URL, // e.g. https://qb.example.com
-  API_SECRET_KEY,     // باید با قرنطینه shared باشد
-  RENDER_EXTERNAL_URL,
-  PORT
-} = process.env;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const PORT = process.env.PORT || 3000;
+const OWNER_ID = parseInt(process.env.OWNER_ID) || 0;
+const QUARANTINE_BOT_URL = process.env.QUARANTINE_BOT_URL;
+const API_SECRET_KEY = process.env.API_SECRET_KEY;
+const SELF_BOT_ID = process.env.SELF_BOT_ID || 'trigger_1';
 
-if (!BOT_TOKEN) throw new Error('BOT_TOKEN لازم است');
-if (!QUARANTINE_BOT_URL) throw new Error('QUARANTINE_BOT_URL لازم است');
-if (!API_SECRET_KEY) throw new Error('API_SECRET_KEY لازم است');
+const cache = new NodeCache({
+  stdTTL: 3600,
+  checkperiod: 1200,
+  maxKeys: 2000,
+});
 
-const app = express();
-app.use(express.json({ limit: '256kb' }));
-app.use(helmet());
-app.use(cors({ origin: false }));
-
-const port = Number(PORT || 3001);
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const bot = new Telegraf(BOT_TOKEN);
-const cache = new NodeCache({ stdTTL: 60, checkperiod: 120 });
+const app = express();
 
-let SELF_BOT_ID = null;
+app.use(express.json());
 
-// ---------- Utils ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// ==================[ سشن ]==================
+bot.use(session({
+  defaultSession: () => ({
+    settingTrigger: false,
+    triggerType: null,
+    step: null,
+    delay: null,
+    chatId: null
+  })
+}));
 
-function ensureHttpUrl(u) {
-  try {
-    let s = String(u || '').trim();
-    if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
-    const parsed = new URL(s);
-    return parsed.toString().replace(/\/+$/, '');
-  } catch {
-    throw new Error('QUARANTINE_BOT_URL نامعتبر است');
-  }
-}
+// ==================[ پینگ ]==================
+const startAutoPing = () => {
+  if (!process.env.RENDER_EXTERNAL_URL) return;
+  const PING_INTERVAL = 13 * 60 * 1000 + 59 * 1000;
+  const selfUrl = process.env.RENDER_EXTERNAL_URL;
 
-const QB_URL = ensureHttpUrl(QUARANTINE_BOT_URL);
+  const performPing = async () => {
+    try {
+      await axios.head(`${selfUrl}/ping`, { timeout: 5000 });
+    } catch (error) {
+      setTimeout(performPing, 60000);
+    }
+  };
 
-function escapeHtml(s = '') {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
+  setTimeout(performPing, 30000);
+  setInterval(performPing, PING_INTERVAL);
+};
 
-// apply entities safely onto already-escaped text
-function createFormattedMessage(text = '', entities = []) {
-  let base = escapeHtml(text);
-  if (!Array.isArray(entities) || entities.length === 0) {
-    return { text: base, parse_mode: 'HTML', disable_web_page_preview: true };
-  }
-
-  // محاسبهٔ substring امن: فرض بر این است که offset/length بر اساس متن خام است.
-  // چون escape انجام شده، offsets بر هم می‌خورد. راه امن: فعلاً فقط متن خام را Escape می‌کنیم
-  // و از entities برای wrap کردن کل متن صرف‌نظر می‌کنیم مگر اینکه نیاز شدید داشته باشی.
-  // (اگر لازم داری دقیقاً همسان تلگرام رفتار کند، باید mapping خام→escaped بسازی.)
-  return { text: base, parse_mode: 'HTML', disable_web_page_preview: true };
-}
-
-// ---------- Release bridge ----------
-async function callRelease(userId, sourceBot = 'trigger-bot') {
-  const url = `${QB_URL}/api/release-user`;
-  const payload = { userId, secretKey: API_SECRET_KEY, sourceBot };
-  const { data } = await axios.post(url, payload, { timeout: 10_000 });
-  return Boolean(data?.success);
-}
-
-// ---------- Bot logic (triggering) ----------
-bot.on('chat_member', async (ctx) => {
-  try {
-    const cmu = ctx.update.chat_member;
-    const chatId = cmu.chat.id;
-    const userId = cmu.new_chat_member?.user?.id;
-    if (!chatId || !userId) return;
-
-    // نمونه: پیام خوش‌آمد تأخیری + آزادسازی
-    const name = cmu.new_chat_member?.user?.first_name || 'دوست عزیز';
-    const msg = createFormattedMessage(`خوش اومدی ${name}! لطفاً قوانین گروه را بخوان.`);
-    await sleep(1500);
-    await ctx.reply(msg.text, { parse_mode: msg.parse_mode, disable_web_page_preview: true });
-
-    // سپس درخواست آزادسازی به قرنطینه
-    await callRelease(userId, 'trigger-bot:welcome');
-  } catch (e) {
-    console.log('[TB] chat_member error:', e?.message);
-  }
+app.head('/ping', (req, res) => res.status(200).end());
+app.get('/ping', (req, res) => {
+  res.status(200).json({ status: 'active', bot: SELF_BOT_ID });
 });
 
-// نمونهٔ ساده از یک دستور برای تست
-bot.command('ping', (ctx) => ctx.reply('pong'));
-
-// ---------- HTTP ----------
-app.get('/', (_, res) => res.type('html').send('<h1>🤖 Trigger bot is up</h1>'));
-app.get('/health', (_, res) => res.json({ ok: true }));
-
-// اگر می‌خواهی endpoint داخلی release-user بماند، ایمنش می‌کنیم (یا کامل حذفش کن)
-app.post('/api/release-user', async (req, res) => {
+// ==================[ تابع آزادسازی ]==================
+const releaseUserFromQuarantine = async (userId) => {
   try {
-    const { userId, secretKey } = req.body || {};
-    if (secretKey !== API_SECRET_KEY) return res.status(401).json({ success: false });
-    const uid = Number(userId);
-    if (!Number.isInteger(uid) || uid <= 0) return res.status(400).json({ success: false, error: 'Bad userId' });
-    // اینجا عمداً کار خاصی نمی‌کنیم؛ فقط OK می‌دهیم.
-    return res.json({ success: true, echo: uid });
-  } catch {
-    return res.status(500).json({ success: false });
-  }
-});
-
-// وبهوک امن
-const webhookPath = '/webhook';
-if (RENDER_EXTERNAL_URL) {
-  app.use(webhookPath, (req, res, next) => {
-    const token = req.get('X-Telegram-Bot-Api-Secret-Token');
-    if (!API_SECRET_KEY || token !== API_SECRET_KEY) return res.sendStatus(401);
-    return bot.webhookCallback(webhookPath)(req, res, next);
-  });
-}
-
-// ---------- Launch ----------
-(async () => {
-  try {
-    const me = await bot.telegram.getMe();
-    SELF_BOT_ID = me?.id;
-    console.log('[TB] Bot username:', me?.username, 'ID:', SELF_BOT_ID);
-
-    if (RENDER_EXTERNAL_URL) {
-      const url = `${RENDER_EXTERNAL_URL}${webhookPath}`;
-      await bot.telegram.setWebhook(url, { secret_token: API_SECRET_KEY });
-      console.log('[TB] Webhook set:', url);
-    } else {
-      await bot.launch();
-      console.log('[TB] Bot started in polling mode');
+    if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) {
+      console.log('❌ آدرس ربات قرنطینه یا کلید API تنظیم نشده');
+      return false;
     }
 
-    app.listen(port, () => console.log('[TB] HTTP listening on', port));
-  } catch (e) {
-    console.error('[TB] Startup error:', e?.message);
-    process.exit(1);
-  }
-})();
+    console.log(`🔓 درخواست آزادسازی کاربر ${userId} از قرنطینه...`);
+    
+    let apiUrl = QUARANTINE_BOT_URL;
+    if (!apiUrl.startsWith('http')) {
+      apiUrl = `https://${apiUrl}`;
+    }
+    
+    apiUrl = apiUrl.replace(/\/+$/, '');
+    const apiEndpoint = `${apiUrl}/api/release-user`;
 
-process.on('unhandledRejection', (err) => {
-  console.error('[TB] UnhandledRejection:', err?.message);
+    const requestData = {
+      userId: parseInt(userId),
+      secretKey: API_SECRET_KEY,
+      sourceBot: SELF_BOT_ID
+    };
+
+    // تلاش با مکانیزم retry
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`🔄 تلاش ${attempt} برای آزادسازی کاربر ${userId}...`);
+        
+        const response = await axios.post(apiEndpoint, requestData, {
+          timeout: 10000,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (response.data && response.data.success) {
+          console.log(`✅ کاربر ${userId} با موفقیت آزاد شد`);
+          cache.del(`user_quarantine_${userId}`);
+          return true;
+        } else {
+          console.log(`❌ پاسخ ناموفق از ربات قرنطینه:`, response.data);
+        }
+      } catch (error) {
+        console.log(`❌ خطا در تلاش ${attempt}:`, error.message);
+        if (attempt < 3) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+    }
+
+    console.log(`❌ آزادسازی کاربر ${userId} پس از 3 تلاش ناموفق ماند`);
+    return false;
+  } catch (error) {
+    console.log(`❌ خطای غیرمنتظره در آزادسازی کاربر ${userId}:`, error.message);
+    return false;
+  }
+};
+
+// ==================[ تابع ایجاد فرمت پیام ]==================
+const createFormattedMessage = (text, entities = []) => {
+  if (!entities || entities.length === 0) {
+    return {
+      text: text || 'پیام خالی',
+      parse_mode: undefined,
+      disable_web_page_preview: true
+    };
+  }
+
+  let formattedText = text || '';
+  const sortedEntities = [...entities].sort((a, b) => b.offset - a.offset);
+
+  sortedEntities.forEach(entity => {
+    const { offset, length, type } = entity;
+    const start = offset;
+    const end = offset + length;
+    
+    if (start >= formattedText.length || end > formattedText.length) return;
+
+    const entityText = formattedText.substring(start, end);
+    let wrappedText = entityText;
+    
+    switch (type) {
+      case 'bold':
+        wrappedText = `<b>${entityText}</b>`;
+        break;
+      case 'italic':
+        wrappedText = `<i>${entityText}</i>`;
+        break;
+      case 'underline':
+        wrappedText = `<u>${entityText}</u>`;
+        break;
+      case 'strikethrough':
+        wrappedText = `<s>${entityText}</s>`;
+        break;
+      case 'code':
+        wrappedText = `<code>${entityText}</code>`;
+        break;
+      case 'pre':
+        wrappedText = `<pre>${entityText}</pre>`;
+        break;
+      case 'text_link':
+        wrappedText = `<a href="${entity.url}">${entityText}</a>`;
+        break;
+      case 'text_mention':
+        wrappedText = `<a href="tg://user?id=${entity.user.id}">${entityText}</a>`;
+        break;
+      default:
+        wrappedText = entityText;
+    }
+
+    formattedText = formattedText.substring(0, start) + wrappedText + formattedText.substring(end);
+  });
+
+  return {
+    text: formattedText,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
+  };
+};
+
+// ==================[ پردازش پیام‌ها ]==================
+bot.on('text', async (ctx) => {
+  try {
+    const text = ctx.message.text;
+
+    if (text.includes('#ورود')) await handleTrigger(ctx, 'ورود');
+    if (text.includes('#ماشین')) await handleTrigger(ctx, 'ماشین');
+    if (text.includes('#موتور')) await handleTrigger(ctx, 'موتور');
+    if (text.includes('#خروج')) await handleTrigger(ctx, 'خروج');
+  
+    if (!ctx.session.settingTrigger) return;
+  
+    const access = checkOwnerAccess(ctx);
+    if (!access.hasAccess) {
+      ctx.reply(access.message);
+      ctx.session.settingTrigger = false;
+      return;
+    }
+  
+    if (ctx.session.step === 'delay') {
+      const delay = parseInt(ctx.message.text);
+      if (isNaN(delay) || delay <= 0 || delay > 3600) {
+        ctx.reply('❌ عدد 1 تا 3600');
+        return;
+      }
+  
+      ctx.session.delay = delay;
+      ctx.session.step = 'message';
+      await ctx.reply(`✅ زمان: ${formatTime(delay)}\n📝 پیام:`);
+    } else if (ctx.session.step === 'message') {
+      try {
+        const text = ctx.message.text;
+        const entities = ctx.message.entities || [];
+        
+        await supabase.from('triggers').delete()
+          .eq('chat_id', ctx.session.chatId)
+          .eq('trigger_type', ctx.session.triggerType);
+
+        const { error } = await supabase.from('triggers').insert({
+          chat_id: ctx.session.chatId,
+          trigger_type: ctx.session.triggerType,
+          delay: ctx.session.delay,
+          delayed_message: text,
+          message_entities: entities,
+          updated_at: new Date().toISOString()
+        });
+
+        if (!error) {
+          cache.del(`trigger_${ctx.session.chatId}_${ctx.session.triggerType}`);
+          const emoji = ctx.session.triggerType === 'ورود' ? '🚪' :
+                        ctx.session.triggerType === 'ماشین' ? '🚗' : '🏍️';
+          ctx.reply(`${emoji} تریگر #${ctx.session.triggerType} تنظیم شد!`);
+        } else {
+          ctx.reply('❌ خطا در ذخیره تریگر');
+        }
+      } catch (error) {
+        console.log('خطا در ذخیره:', error);
+        ctx.reply('❌ خطا در ذخیره');
+      }
+      ctx.session.settingTrigger = false;
+    }
+  } catch (error) {
+    console.log('خطا در پردازش پیام:', error.message);
+  }
+});
+
+// ==================[ API ]==================
+app.post('/api/release-user', async (req, res) => {
+  try {
+    const { userId, secretKey } = req.body;
+    
+    if (!secretKey || secretKey !== API_SECRET_KEY) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    
+    res.status(200).json({ success: true, botId: SELF_BOT_ID });
+  } catch (error) {
+    res.status(500).json({ error: 'error' });
+  }
+});
+
+// ==================[ راه‌اندازی ]==================
+app.use(bot.webhookCallback('/webhook'));
+app.get('/', (req, res) => {
+  res.send(`🤖 تریگر ${SELF_BOT_ID} فعال - مالک: ${OWNER_ID}`);
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 تریگر ${SELF_BOT_ID} راه‌اندازی شد`);
+  startAutoPing();
+});
+
+if (process.env.RENDER_EXTERNAL_URL) {
+  const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
+  bot.telegram.setWebhook(webhookUrl)
+    .then(() => console.log('✅ Webhook تنظیم شد'))
+    .catch(() => bot.launch());
+} else {
+  bot.launch();
+}
+
+process.on('unhandledRejection', (error) => {
+  console.log('خطای catch نشده:', error.message);
 });
