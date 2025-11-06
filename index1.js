@@ -8,14 +8,12 @@ const NodeCache = require('node-cache');
 // ---------- Env ----------
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY; // بهتره Service Role باشه
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY; // ترجیحاً service_role
 const PORT = process.env.PORT || 3000;
 const OWNER_ID = parseInt(process.env.OWNER_ID || '0', 10);
 const SELF_BOT_ID = process.env.SELF_BOT_ID || 'trigger_1';
-
-const QUARANTINE_BOT_URL = process.env.QUARANTINE_BOT_URL || ''; // مثلا https://your-quarantine-service.onrender.com
+const QUARANTINE_BOT_URL = process.env.QUARANTINE_BOT_URL || '';
 const API_SECRET_KEY = process.env.API_SECRET_KEY || '';
-// -------------------------------------------------
 
 if (!BOT_TOKEN) { console.error('❌ BOT_TOKEN تنظیم نشده'); process.exit(1); }
 if (!SUPABASE_URL || !SUPABASE_KEY) { console.error('❌ SUPABASE_URL/SUPABASE_KEY تنظیم نشده'); process.exit(1); }
@@ -27,6 +25,9 @@ const app = express();
 app.use(express.json());
 
 const cache = new NodeCache({ stdTTL: 3600, checkperiod: 1200, maxKeys: 4000 });
+
+// برای جلوگیری از دوبل‌شدن jobها
+const scheduledJobs = new Set(); // key: `${chatId}:${messageId}`
 
 // ---------- Session ----------
 bot.use(session({
@@ -64,7 +65,7 @@ const createFormattedMessage = (text, entities = []) => {
   const sorted = [...entities].sort((a, b) => b.offset - a.offset);
   sorted.forEach((e) => {
     const start = e.offset, end = e.offset + e.length;
-    if (start >= t.length || end > t.length || start < 0 || end < 0) return;
+    if (start < 0 || end > t.length) return;
     const chunk = t.substring(start, end);
     let w = chunk;
     switch (e.type) {
@@ -100,63 +101,44 @@ const getTriggerRow = async (chatId, triggerType) => {
   return null;
 };
 
-// ارسال پیام با تاخیر + رتریِ مقاوم
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// بررسی عضویت ربات در گروه قبل از ارسال
+const isBotStillMember = async (chatId) => {
+  try {
+    const me = await bot.telegram.getMe();
+    const st = await bot.telegram.getChatMember(chatId, me.id);
+    return ['administrator', 'creator', 'member'].includes(st.status);
+  } catch {
+    return false;
+  }
+};
 
-const sendDelayedWithRetry = async (bot, { delaySec, chatId, replyToMessageId, text, entities }) => {
-  // صبر اولیه
-  await sleep(Math.max(0, delaySec) * 1000);
+// ارسال با رتریِ فقط برای خطاهای موقتی
+const shouldRetry = (err) => {
+  const desc = (err && err.response && err.response.description) || err.message || '';
+  if (/^403:/.test(desc) || /chat not found/i.test(desc) || /bad request/i.test(desc)) return false; // غیرموقتی
+  if (/^400:/.test(desc)) return false;
+  // موقتی‌ها:
+  return /429|timeout|ETIMEOUT|ECONNRESET|EAI_AGAIN|5\d{2}/i.test(desc);
+};
 
-  // آماده‌سازی پیام
-  const fmt = createFormattedMessage(text, entities);
-
-  const attempts = [0, 1000, 3000, 7000]; // شروع فوری، سپس 1s، 3s، 7s بک‌آف
+const sendWithSmartRetry = async ({ chatId, replyToMessageId, html, extra }) => {
+  const attempts = [0, 1000, 3000]; // حداکثر 3 تلاش
   let lastErr = null;
-
   for (let i = 0; i < attempts.length; i++) {
-    if (i > 0) await sleep(attempts[i]);
-
+    if (i > 0) await new Promise(r => setTimeout(r, attempts[i]));
     try {
-      await bot.telegram.sendMessage(
-        chatId,
-        fmt.html,
-        {
-          reply_to_message_id: replyToMessageId,
-          ...createGlassButton(),
-          ...fmt.extra
-        }
-      );
-      return true; // موفق
+      await bot.telegram.sendMessage(chatId, html, { reply_to_message_id: replyToMessageId, ...createGlassButton(), ...extra });
+      return true;
     } catch (e) {
       lastErr = e;
-      const msg = (e && e.response && e.response.description) || e.message || `${e}`;
-      // اگر مشکل از entities بود، یک‌بار بدون entities بفرست
-      if (/ENTITY|parse_mode|can't parse/i.test(msg)) {
-        try {
-          await bot.telegram.sendMessage(
-            chatId,
-            text,
-            {
-              reply_to_message_id: replyToMessageId,
-              ...createGlassButton(),
-              parse_mode: undefined,
-              disable_web_page_preview: true
-            }
-          );
-          return true;
-        } catch (e2) {
-          lastErr = e2;
-        }
-      }
-      // سایر خطاها → میریم برای تلاش بعدی
+      if (!shouldRetry(e)) break;
     }
   }
-
   console.log('❌ ارسال پیام تاخیری شکست خورد:', (lastErr && lastErr.message) || lastErr);
   return false;
 };
 
-// آزادسازی کاربر از قرنطینه (فراخوانی سرویس قرنطینه)
+// آزادسازی کاربر از قرنطینه (اختیاری)
 const releaseUserFromQuarantine = async (userId) => {
   if (!QUARANTINE_BOT_URL || !API_SECRET_KEY) return true;
   let apiUrl = QUARANTINE_BOT_URL.startsWith('http') ? QUARANTINE_BOT_URL : `https://${QUARANTINE_BOT_URL}`;
@@ -164,12 +146,12 @@ const releaseUserFromQuarantine = async (userId) => {
   const apiEndpoint = `${apiUrl}/api/release-user`;
   const body = { userId: parseInt(userId, 10), secretKey: API_SECRET_KEY, sourceBot: SELF_BOT_ID };
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const resp = await axios.post(apiEndpoint, body, { timeout: 10000, headers: { 'Content-Type': 'application/json' }});
+      const resp = await axios.post(apiEndpoint, body, { timeout: 8000, headers: { 'Content-Type': 'application/json' }});
       if (resp.data?.success) return true;
-    } catch { /* retry */ }
-    await sleep(1500);
+    } catch {}
+    await new Promise(r => setTimeout(r, 1200));
   }
   return false;
 };
@@ -269,27 +251,49 @@ const handleTrigger = async (ctx, triggerType) => {
     const initial = `${emoji}┊${userName} وارد منطقه شد\n\n⏳┊زمان: ${formatTime(delay)}`;
     await ctx.reply(initial, { reply_to_message_id: ctx.message.message_id, ...createGlassButton() });
 
-    const chatId = ctx.chat.id, messageId = ctx.message.message_id;
+    const chatId = ctx.chat.id;
+    const messageId = ctx.message.message_id;
+    const jobKey = `${chatId}:${messageId}`;
 
-    // ارسال تاخیریِ مقاوم
-    const ok = await sendDelayedWithRetry(bot, {
-      delaySec: delay,
-      chatId,
-      replyToMessageId: messageId,
-      text: delayedMessage,
-      entities: messageEntities
-    });
+    // جلوگیری از دوبل‌شدن job
+    if (scheduledJobs.has(jobKey)) return;
+    scheduledJobs.add(jobKey);
 
-    if (ok) {
-      // بعد از پیام تاخیری، آزادسازی از قرنطینه (اگر لینک شده)
-      await releaseUserFromQuarantine(userId);
-    }
+    // زمان‌بندی غیرمسدودکننده
+    setTimeout(async () => {
+      try {
+        // اگر ربات دیگر عضو گروه نیست، ارسال را لغو کن
+        const stillMember = await isBotStillMember(chatId);
+        if (!stillMember) return;
+
+        // آماده‌سازی متن
+        const fmt = createFormattedMessage(delayedMessage, messageEntities);
+
+        // ارسال با رتری موقتی
+        const ok = await sendWithSmartRetry({
+          chatId,
+          replyToMessageId: messageId,
+          html: fmt.html,
+          extra: fmt.extra
+        });
+
+        if (ok) {
+          // آزادسازی از قرنطینه (اگر لینک شده)
+          await releaseUserFromQuarantine(userId);
+        }
+      } catch (e) {
+        console.log('❌ ارسال پیام تاخیری/آزادسازی:', e.message);
+      } finally {
+        scheduledJobs.delete(jobKey);
+      }
+    }, delay * 1000);
+
   } catch (e) {
     console.log('❌ پردازش تریگر:', e.message);
   }
 };
 
-// #خروج: فقط پیام فوری (بدون تاخیر و بدون دخالت Supabase)
+// #خروج: فقط پیام فوری
 const handleFarewell = async (ctx) => {
   try {
     if (ctx.chat.type === 'private') return;
